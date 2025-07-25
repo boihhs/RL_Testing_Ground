@@ -1,0 +1,303 @@
+import jax.numpy as jnp, jax
+from jax import random
+from jax import lax
+from jax.tree_util import register_pytree_node_class
+from functools import partial
+from Mujoco_Env.Sim import Sim, SimCfg
+import optax
+from flax.training import checkpoints
+from pathlib import Path
+from dataclasses import dataclass, field
+from Models.Policy import Policy
+from Models.Value import Value
+from Buffer.Buffer import ReplayBuffer
+import yaml
+import matplotlib.pyplot as plt
+from jax import debug
+import numpy as np
+
+np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+
+@jax.tree_util.register_dataclass
+@dataclass
+class ModelContainer:
+    model: any
+    opt: optax.GradientTransformation = field(metadata={"static": True})
+    opt_state: optax.OptState
+
+@register_pytree_node_class
+class PPO:
+    def __init__(self, cfg_file):
+
+        self.key = random.PRNGKey(0)
+
+        with open(cfg_file, "r", encoding="utf-8") as f:
+            self.cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+        env_cfg = SimCfg(self.cfg["PPO"]["xml_path"], self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["model_freq"], jnp.array(self.cfg["PPO"]["init_pos"]), jnp.array(self.cfg["PPO"]["init_vel"]), self.cfg["PPO"]["std_gyro"], self.cfg["PPO"]["std_acc"], self.cfg["PPO"]["std_joint_pos"], self.cfg["PPO"]["std_joint_vel"], jnp.array(self.cfg["PPO"]["stiffness"]), jnp.array(self.cfg["PPO"]["damping"]), jnp.array(self.cfg["PPO"]["torque_limit"]))
+        self.env = Sim(env_cfg)
+
+        self.key, subkey = jax.random.split(self.key)
+        value_1 = Value(jnp.array(self.cfg["PPO"]["value_model_shape"]), subkey)
+        
+        self.key, subkey = jax.random.split(self.key)
+        policy = Policy(jnp.array(self.cfg["PPO"]["policy_model_shape"]), jnp.array(self.cfg["PPO"]["action_scale"]), jnp.array(self.cfg["PPO"]["default_qpos"]), subkey)
+        
+        self.buffer = ReplayBuffer(self.cfg["PPO"]["horizon_length"] * (self.cfg["PPO"]["batch_size"]), self.cfg["PPO"]["total_obs_dim"], self.cfg["PPO"]["action_dim"], self.cfg["PPO"]["mini_batch_size"])
+
+        policy_opt = optax.chain(
+            optax.clip_by_global_norm(0.5),
+            optax.adam(learning_rate=float(self.cfg["PPO"]["learning_rate_policy"]))
+        )
+        policy_opt_state = policy_opt.init(policy)
+        self.policy_container = ModelContainer(policy, policy_opt, policy_opt_state)
+
+        value_1_opt = optax.chain(
+            optax.clip_by_global_norm(0.5),
+            optax.adam(learning_rate=float(self.cfg["PPO"]["learning_rate_value"]))
+        )
+        value_1_opt_state = value_1_opt.init(value_1)
+        self.value_1_container = ModelContainer(value_1, value_1_opt, value_1_opt_state)
+
+        
+    @jax.jit
+    def loss(self, buffer, value_1, policy, old_log_probs):
+        states, actions, rewards, next_states, dones = buffer.states, buffer.actions, buffer.rewards, buffer.next_states, buffer.dones
+
+        values = value_1(states)
+        next_values = value_1(next_states)
+
+        deltas = rewards[:, None] + self.cfg["PPO"]["gamma"] * (dones == 0)[:, None] * next_values - values
+        deltas_batch = deltas.reshape((self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["horizon_length"]))
+        dones_batch = dones.reshape((self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["horizon_length"]))
+
+        @jax.vmap 
+        def _calc_all(deltas, dones):
+            T = deltas.shape[0]
+
+            @jax.jit
+            def _calc_adv(context, xs):
+                advantage = context
+                delta, done = xs
+                advantage = delta + self.cfg["PPO"]["gamma"] * self.cfg["PPO"]["lambda"] * (done == 0) * advantage
+
+                return advantage, advantage
+            
+            advantage = jnp.zeros(deltas[0].shape)
+            _, advantages = jax.lax.scan(_calc_adv, advantage, (deltas, dones), length = T, reverse=True)
+            return advantages
+        
+        advantages_batch = _calc_all(deltas_batch, dones_batch)
+        advantages = advantages_batch.reshape(deltas.shape)
+
+        returns = values + advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        advantages = jax.tree_util.tree_map(jax.lax.stop_gradient, advantages)
+        returns    = jax.tree_util.tree_map(jax.lax.stop_gradient, returns)
+
+        loss_value = jnp.mean((returns - values) ** 2)
+
+        policy_obs = states[:, :self.cfg["PPO"]["policy_state_dim"]]
+        new_log_probs, means, log_std = policy.get_log_prob(policy_obs, actions)
+      
+        ratio = jnp.exp(new_log_probs - old_log_probs)
+        
+        surrogate = advantages * ratio[:, None]
+        surrogate_clipped = advantages * jnp.clip(ratio, 1.0 - self.cfg["PPO"]["e_clip"], 1.0 + self.cfg["PPO"]["e_clip"])[:, None]
+        policy_loss = -jnp.mean(jnp.minimum(surrogate, surrogate_clipped))
+        
+
+        bound_loss = jnp.mean(jnp.clip(means - 1.0, min=0.0)**2) + jnp.mean(jnp.clip(means + 1.0, max=0.0)**2)
+
+        entropy_loss = jnp.mean(.5 * jnp.log(2*jnp.pi*jnp.exp(1)) + log_std)
+
+        loss = loss_value + policy_loss + float(self.cfg["PPO"]["bound_coef"]) * bound_loss + float(self.cfg["PPO"]["entropy_coef"]) * entropy_loss
+        # jax.debug.print("dones {}", dones)
+        # jax.debug.print("states {}", states[:, 77])
+        # jax.debug.print("surrogate {}", surrogate_clipped.transpose())
+        jax.debug.print("mean mean {}", jnp.mean(jnp.abs(means)))
+        jax.debug.print("std mean? {}", jnp.mean(jnp.exp(log_std)))
+        jax.debug.print("loss_value mean? {}", jnp.mean(loss_value))
+        jax.debug.print("policy_loss mean? {}", jnp.mean(policy_loss))
+        jax.debug.print("bound_loss mean? {}", jnp.mean(bound_loss))
+        jax.debug.print("entropy_loss mean? {}", jnp.mean(entropy_loss))
+        
+        return loss
+        
+    
+   
+    def run(self):
+
+        avg_loss = []
+        avg_buffer_rewards = []
+
+        key = jax.random.PRNGKey(0)
+
+        envs, step_counter = self.env.reset()
+
+        @jax.jit
+        def _rollout(context, xs):
+            envs, step_counter, buffer, policy, key = context
+
+            key, subkey = jax.random.split(key)
+            current_env_obs = self.env.getObs(envs, subkey)
+            policy_obs = current_env_obs[:, :self.cfg["PPO"]["policy_state_dim"]]
+
+            key, subkey = jax.random.split(key)
+            actions = policy.get_action(policy_obs, subkey)
+            
+
+            rewards, dones = self.get_reward_and_dones(current_env_obs, actions, step_counter)
+            envs, step_counter = self.env.reset_partial(envs, dones, step_counter)
+
+            next_envs, step_counter = self.env.step(envs, actions, step_counter)
+
+            key, subkey = jax.random.split(key)
+            buffer = buffer.add_batch_PPO(current_env_obs, actions, rewards, self.env.getObs(next_envs, subkey), dones)
+            buffer = jax.tree_util.tree_map(jax.lax.stop_gradient, buffer)
+            # jax.debug.print("buffer states {}", buffer.states)
+            
+            return (next_envs, step_counter, buffer, policy, key), None
+        
+
+        @jax.jit
+        def _loop_minibatch(context, xs):
+            value_1_container, policy_container, buffer, old_log_probs = context
+            value_1, policy = value_1_container.model, policy_container.model
+            value_1_opt, policy_opt = value_1_container.opt, policy_container.opt
+            value_1_opt_state, policy_opt_state = value_1_container.opt_state, policy_container.opt_state
+
+            loss, (grads_value_1, grads_policy) = jax.value_and_grad(self.loss, argnums=(1,2)) (buffer, value_1, policy, old_log_probs)
+            
+            updates_value_1, value_1_opt_state = value_1_opt.update(grads_value_1, value_1_opt_state, value_1)
+            value_1 = optax.apply_updates(value_1, updates_value_1)
+            value_1_container = ModelContainer(value_1, value_1_opt, value_1_opt_state)
+
+
+            updates_policy, policy_opt_state = policy_opt.update(grads_policy, policy_opt_state, policy)
+            policy = optax.apply_updates(policy, updates_policy)
+            policy_container = ModelContainer(policy, policy_opt, policy_opt_state)
+
+            return (value_1_container, policy_container, buffer, old_log_probs), (loss)
+        
+        for i in range(self.cfg["PPO"]["num_epocs"]):
+            policy = self.policy_container.model
+
+            key, subkey = jax.random.split(key)
+            (envs, step_counter, self.buffer, _, key), _ = jax.lax.scan(_rollout, (envs, step_counter, self.buffer, policy, subkey), None, length = int(self.cfg["PPO"]["horizon_length"]))
+            
+            policy_obs = self.buffer.states[:, :self.cfg["PPO"]["policy_state_dim"]]
+            old_log_probs, _, _ = policy.get_log_prob(policy_obs, self.buffer.actions)
+            old_log_probs = jax.tree_util.tree_map(jax.lax.stop_gradient, old_log_probs)
+
+            (self.value_1_container, self.policy_container, self.buffer, _), (loss) = jax.lax.scan(_loop_minibatch, (self.value_1_container, self.policy_container, self.buffer, old_log_probs), None, length = int(self.cfg["PPO"]["mini_batch_loops"]))
+
+            print("Rewards Batch Average:", jnp.mean(self.buffer.rewards), "loss Average:", jnp.mean(loss))
+            avg_buffer_rewards.append(jnp.mean(self.buffer.rewards))
+            avg_loss.append(jnp.mean(loss))
+
+            ckpt_dir = Path("checkpoints").resolve()
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            checkpoints.save_checkpoint(
+                ckpt_dir=ckpt_dir,
+                target=self.policy_container.model,
+                step=i,
+                prefix="policy_",
+                overwrite=True
+            )
+
+        plt.figure(figsize=(12, 8))
+
+        plt.subplot(2, 2, 1)
+        plt.plot(avg_buffer_rewards)
+        plt.title("avg_buffer_rewards")
+        plt.xlabel("Step")
+        plt.ylabel("Reward")
+        plt.grid(True)
+
+        plt.subplot(2, 2, 2)
+        plt.plot(avg_loss)
+        plt.title("avg_loss")
+        plt.xlabel("Step")
+        plt.ylabel("Loss")
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.show()
+
+
+    @jax.jit
+    def get_reward_and_dones(self, envs, actions, step_counters):
+
+        @partial(jax.vmap, in_axes=(0, 0, 0), out_axes=(0, 0))
+        def _get_reward_and_done_helper(envs, actions, step_counter):
+            current_ctrl = envs[:23]
+            joint_pos = envs[23:46]
+            joint_vel = envs[46:69]
+            base_ang_vel = envs[69:72]
+            base_lin_accel = envs[72:75]
+            quat = envs[75:79]
+            body_pos = envs[79:82]
+            body_vel = envs[82:85]
+            right_foot_pos = envs[85:88]
+            left_foot_pos = envs[88:91]
+
+            def _quat_to_small_euler(q):
+                qw, qx, qy, qz = q
+                pitch = jnp.arcsin(jnp.clip(2 * (qw*qy - qz*qx), -1.0, 1.0))
+                roll  = jnp.arctan2(2 * (qw*qx + qy*qz), 1 - 2 * (qx*qx + qy*qy))
+                return pitch, roll
+            
+            pitch, roll = _quat_to_small_euler(quat)
+
+            target   = jnp.array([0, 0.0, 0.65])
+            dist     = jnp.linalg.norm(target - body_pos)
+            reward_dist   = jnp.exp(-5*dist)
+
+
+            reward = (
+                reward_dist
+            )
+            reward = jnp.clip(reward, -1.0, 5.0)
+
+            # fallen = (
+            #     (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))
+            
+            # )
+            done = jnp.where((step_counter >= self.cfg["PPO"]["max_timesteps"]), 1, 0)
+
+            return reward, done
+
+        
+        return _get_reward_and_done_helper(envs, actions, step_counters)
+    
+
+    def tree_flatten(self):
+        children = (self.key, self.value_1_container, self.policy_container, self.buffer)
+        aux = (self.cfg, self.env)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+
+        obj = cls.__new__(cls)
+        (obj.key, obj.value_1_container, obj.policy_container, obj.buffer) = children
+        (obj.cfg, obj.env) = aux
+   
+        return obj
+    
+
+    
+        
+
+
+
+
+
+
+
+            
+
+
+
