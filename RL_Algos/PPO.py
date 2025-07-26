@@ -43,7 +43,7 @@ class PPO:
         value_1 = Value(jnp.array(self.cfg["PPO"]["value_model_shape"]), subkey)
         
         self.key, subkey = jax.random.split(self.key)
-        policy = Policy(jnp.array(self.cfg["PPO"]["policy_model_shape"]), jnp.array(self.cfg["PPO"]["action_scale"]), jnp.array(self.cfg["PPO"]["default_qpos"]), subkey)
+        policy = Policy(jnp.array(self.cfg["PPO"]["policy_model_shape"]), jnp.array(self.cfg["PPO"]["default_qpos"]), subkey)
         
         self.buffer = ReplayBuffer(self.cfg["PPO"]["horizon_length"] * (self.cfg["PPO"]["batch_size"]), self.cfg["PPO"]["total_obs_dim"], self.cfg["PPO"]["action_dim"], self.cfg["PPO"]["mini_batch_size"])
 
@@ -253,15 +253,33 @@ class PPO:
             
             pitch, roll = _quat_to_small_euler(quat)
 
-            target   = jnp.array([1., 0.0, 0.65])
-            dist     = jnp.linalg.norm(target - body_pos)
-            reward_dist   = jnp.exp(-5*dist)
+            goal_vx = .2
+            goal_height = .6
 
+            survial = 1 * .025
+            velocity_tracking_x = jnp.exp(-(goal_vx - body_vel[0])**2)
+            velocity_tracking_y = jnp.exp(-(body_vel[1])**2)
+            # velocity_tracking_yaw = jnp.exp(-(body_vel[2])**2)
+            base_height = (goal_height - body_pos[2])**2 * -20
+            torque = jnp.linalg.norm(current_ctrl) * -2e-4
+            torque_tired = jnp.linalg.norm(current_ctrl/jnp.array(self.cfg["PPO"]["torque_limit"])) * -1e-2
+            power = jnp.maximum(jnp.sum(current_ctrl * joint_vel), 0) * -2e-4
+            lin_vel_z = (body_vel[2])**2 * -2
+            ang_vel_xy = jnp.linalg.norm(base_ang_vel[:2]) * -.2
+            joint_vel_reward = jnp.linalg.norm(joint_vel) * -1e-4
+            base_accel = (jnp.linalg.norm(body_vel) + jnp.linalg.norm(base_ang_vel)) * -1e-4
+            # action_rate = 
+            joint_pos_limit = jnp.sum(jnp.where(joint_pos > jnp.array(self.cfg["PPO"]["joint_q_max"]), 1, 0) + jnp.where(joint_pos < jnp.array(self.cfg["PPO"]["joint_q_min"]), 1, 0)) * -1.
+            # collison = 
+            feet_z = (right_foot_pos[2] + left_foot_pos[2]) * 3
 
             reward = (
-                reward_dist
+                survial + velocity_tracking_x + velocity_tracking_y + base_height + torque
+                + torque_tired + power + lin_vel_z + ang_vel_xy + joint_vel_reward + 
+                base_accel + joint_pos_limit + feet_z
             )
-            reward = jnp.clip(reward, -1.0, 5.0)
+
+            reward = jnp.clip(reward, min=0)
 
             fallen = (
                 (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))

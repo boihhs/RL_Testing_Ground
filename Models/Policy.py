@@ -6,11 +6,10 @@ from functools import partial
 
 @register_pytree_node_class
 class Policy:
-    def __init__(self, layer_sizes, action_scale, action_bias, key=random.PRNGKey(0)):
+    def __init__(self, layer_sizes, action_bias, key=random.PRNGKey(0)):
         self.params = self.init_network_params(layer_sizes, key)
         self.LOG_STD_MIN = -5
         self.LOG_STD_MAX = .5
-        self.action_scale = action_scale
         self.action_bias = action_bias
        
     @staticmethod
@@ -81,7 +80,7 @@ class Policy:
 
     def tree_flatten(self):
         children = (self.params,)
-        aux = (self.LOG_STD_MIN, self.LOG_STD_MAX, self.action_scale, self.action_bias)
+        aux = (self.LOG_STD_MIN, self.LOG_STD_MAX, self.action_bias)
         return children, aux
 
     @classmethod
@@ -89,5 +88,5 @@ class Policy:
         
         obj = cls.__new__(cls)
         obj.params, = children
-        obj.LOG_STD_MIN, obj.LOG_STD_MAX, obj.action_scale, obj.action_bias = aux
+        obj.LOG_STD_MIN, obj.LOG_STD_MAX, obj.action_bias = aux
         return obj
