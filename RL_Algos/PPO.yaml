@@ -5,8 +5,8 @@ PPO:
   lambda: .95
   e_clip: 0.4
   learning_rate_value: 1e-3
-  learning_rate_policy: 1e-3
-  batch_size: 1024
+  learning_rate_policy: 5e-3
+  batch_size: 512
   bound_coef: 1
   entropy_coef:  -.1
   
@@ -17,10 +17,6 @@ PPO:
 
   xml_path: "./Robot_Models/booster_t1/scene.xml"
   model_freq: 50
-  std_gyro: 0
-  std_acc: 0
-  std_joint_pos: 0
-  std_joint_vel: 0
 
   policy_model_shape: [91, 256, 128, 128, 46] # action_dim * 2
   value_model_shape: [91, 256, 256, 128, 1]
@@ -39,8 +35,8 @@ PPO:
   
   action_dim: 23
 
-  init_pos: [0., 0., 0.015,
-    0., 0.7071068, 0., 0.7071068,
+  init_pos: [0., 0., 0.665,
+    1., 0., 0., 0.,
     0, 0,
     0.2, -1.35, 0, -0.5,
     0.2, 1.35, 0, 0.5,
@@ -63,7 +59,7 @@ PPO:
     20, 20, 20, 20,
     200,
     200, 200, 200, 200, 50, 50,
-    200, 200, 200, 200, 50, 50
+    200, 200, 200, 200, 200, 50
   ]
   damping: [
     0.2, 0.2,
@@ -91,6 +87,41 @@ PPO:
     -0.2, 0, 0, 0.4, -0.25, 0,
     -0.2, 0, 0, 0.4, -0.25, 0
   ]
+
+STD:
+  # std_gyro: .01
+  # std_acc: .2
+  # std_joint_pos: .005
+  # std_joint_vel: .05
+
+  # std_body_mass: .1
+  # std_body_inertia: .1
+  # std_body_ipos: .02
+  # std_geom_friction: .1
+  # std_dof_armature: .025
+  # std_dof_frictionloss: .1
+  # std_stiffness: .1
+  # std_damping: .1
+
+  # std_qpos: .01
+  # std_qvel: .05
+
+  std_gyro: .0
+  std_acc: .0
+  std_joint_pos: .00
+  std_joint_vel: .0
+
+  std_body_mass: .0
+  std_body_inertia: .0
+  std_body_ipos: .0
+  std_geom_friction: .0
+  std_dof_armature: .0
+  std_dof_frictionloss: .0
+  std_stiffness: .0
+  std_damping: .0
+
+  std_qpos: .0
+  std_qvel: .0
 
 Rewards:
 

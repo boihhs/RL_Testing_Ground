@@ -3,7 +3,7 @@ from jax import random
 from jax import lax
 from jax.tree_util import register_pytree_node_class
 from functools import partial
-from Mujoco_Env.Sim import Sim, SimCfg
+from Mujoco_Env.Sim import Sim, SimCfg, ENVS
 import optax
 from flax.training import checkpoints
 from pathlib import Path
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from jax import debug
 import numpy as np
 
-np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+# np.set_printoptions(threshold=np.inf, linewidth=np.inf)
 
 @jax.tree_util.register_dataclass
 @dataclass
@@ -34,7 +34,9 @@ class PPO:
         with open(cfg_file, "r", encoding="utf-8") as f:
             self.cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
 
-        env_cfg = SimCfg(self.cfg["PPO"]["xml_path"], self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["model_freq"], jnp.array(self.cfg["PPO"]["init_pos"]), jnp.array(self.cfg["PPO"]["init_vel"]), self.cfg["PPO"]["std_gyro"], self.cfg["PPO"]["std_acc"], self.cfg["PPO"]["std_joint_pos"], self.cfg["PPO"]["std_joint_vel"], jnp.array(self.cfg["PPO"]["stiffness"]), jnp.array(self.cfg["PPO"]["damping"]), jnp.array(self.cfg["PPO"]["torque_limit"]))
+        env_cfg = SimCfg(self.cfg["PPO"]["xml_path"], self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["model_freq"], jnp.array(self.cfg["PPO"]["init_pos"]), jnp.array(self.cfg["PPO"]["init_vel"]), 
+                         self.cfg["STD"]["std_gyro"], self.cfg["STD"]["std_acc"], self.cfg["STD"]["std_joint_pos"], self.cfg["STD"]["std_joint_vel"], self.cfg["STD"]["std_body_mass"], self.cfg["STD"]["std_body_inertia"], self.cfg["STD"]["std_body_ipos"], self.cfg["STD"]["std_geom_friction"], self.cfg["STD"]["std_dof_armature"], self.cfg["STD"]["std_dof_frictionloss"], self.cfg["STD"]["std_stiffness"], self.cfg["STD"]["std_damping"], self.cfg["STD"]["std_qpos"], self.cfg["STD"]["std_qvel"],
+                         jnp.array(self.cfg["PPO"]["stiffness"]), jnp.array(self.cfg["PPO"]["damping"]), jnp.array(self.cfg["PPO"]["torque_limit"]))
         self.env = Sim(env_cfg)
 
         self.key, subkey = jax.random.split(self.key)
@@ -125,8 +127,7 @@ class PPO:
         
         return loss
         
-    
-   
+
     def run(self):
 
         avg_loss = []
@@ -134,11 +135,13 @@ class PPO:
 
         key = jax.random.PRNGKey(0)
 
-        envs, step_counter = self.env.reset()
+        key, subkey = jax.random.split(key)
+
+        envs = self.env.reset(subkey)
 
         @jax.jit
         def _rollout(context, xs):
-            envs, step_counter, buffer, policy, key = context
+            envs, buffer, policy, key = context
 
             key, subkey = jax.random.split(key)
             current_env_obs = self.env.getObs(envs, subkey)
@@ -148,17 +151,16 @@ class PPO:
             actions = policy.get_action(policy_obs, subkey)
             
 
-            rewards, dones = self.get_reward_and_dones(current_env_obs, actions, step_counter)
-            envs, step_counter = self.env.reset_partial(envs, dones, step_counter)
+            rewards, dones = self.get_reward_and_dones(current_env_obs, actions, envs.step_num)
+            envs = self.env.reset_partial(envs, dones)
 
-            next_envs, step_counter = self.env.step(envs, actions, step_counter)
+            next_envs = self.env.step(envs, actions)
 
             key, subkey = jax.random.split(key)
             buffer = buffer.add_batch_PPO(current_env_obs, actions, rewards, self.env.getObs(next_envs, subkey), dones)
             buffer = jax.tree_util.tree_map(jax.lax.stop_gradient, buffer)
-            # jax.debug.print("buffer states {}", buffer.states)
             
-            return (next_envs, step_counter, buffer, policy, key), None
+            return (next_envs, buffer, policy, key), None
         
 
         @jax.jit
@@ -185,7 +187,7 @@ class PPO:
             policy = self.policy_container.model
 
             key, subkey = jax.random.split(key)
-            (envs, step_counter, self.buffer, _, key), _ = jax.lax.scan(_rollout, (envs, step_counter, self.buffer, policy, subkey), None, length = int(self.cfg["PPO"]["horizon_length"]))
+            (envs, self.buffer, _, key), _ = jax.lax.scan(_rollout, (envs, self.buffer, policy, subkey), None, length = int(self.cfg["PPO"]["horizon_length"]))
             
             policy_obs = self.buffer.states[:, :self.cfg["PPO"]["policy_state_dim"]]
             old_log_probs, _, _ = policy.get_log_prob(policy_obs, self.buffer.actions)
@@ -251,7 +253,7 @@ class PPO:
             
             pitch, roll = _quat_to_small_euler(quat)
 
-            target   = jnp.array([0, 0.0, 0.65])
+            target   = jnp.array([1., 0.0, 0.65])
             dist     = jnp.linalg.norm(target - body_pos)
             reward_dist   = jnp.exp(-5*dist)
 
@@ -261,11 +263,11 @@ class PPO:
             )
             reward = jnp.clip(reward, -1.0, 5.0)
 
-            # fallen = (
-            #     (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))
+            fallen = (
+                (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))
             
-            # )
-            done = jnp.where((step_counter >= self.cfg["PPO"]["max_timesteps"]), 1, 0)
+            )
+            done = jnp.where(fallen | (step_counter >= self.cfg["PPO"]["max_timesteps"]), 1, 0)
 
             return reward, done
 

@@ -45,7 +45,6 @@ class Policy:
         mu = logits[:out_len // 2]
         log_std = logits[out_len // 2:]
         log_std = self.LOG_STD_MIN + .5 * (self.LOG_STD_MAX - self.LOG_STD_MIN) * (jnp.tanh(log_std) + 1)
-        # log_std = jnp.clip(log_std, self.LOG_STD_MIN, self.LOG_STD_MAX) 
 
         return mu, log_std
     

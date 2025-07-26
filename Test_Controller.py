@@ -13,6 +13,19 @@ import numpy as np
 import jax, jax.numpy as jnp
 from flax.training import checkpoints
 from jax import random
+from mujoco import mjx
+
+def print_pytree_structure(pytree, indent=0, path=""):
+    if isinstance(pytree, dict):
+        for key, value in pytree.items():
+            print("  " * indent + f"{path + str(key)}:")
+            print_pytree_structure(value, indent + 1, path + str(key) + ".")
+    elif isinstance(pytree, (list, tuple)):
+        for i, value in enumerate(pytree):
+            print("  " * indent + f"{path}[{i}]:")
+            print_pytree_structure(value, indent + 1, path + f"[{i}].")
+    else:
+        print("  " * indent + f"{path[:-1]}")
 
 
 cfg_file = "/home/leo-benaharon/Desktop/RL_Testing_Ground/RL_Algos/PPO.yaml"
@@ -64,7 +77,6 @@ mj_data = mujoco.MjData(mj_model)
 mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
 
 mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
-
 
 episode_start = time.time()
 DT_CONTROL = 1.0 / cfg["PPO"]["model_freq"]
@@ -140,32 +152,39 @@ with viewer.launch_passive(mj_model, mj_data) as v:
 
         pitch, roll = quat_to_small_euler(quat)                       # torso tilt (rad)
 
-        target   = jnp.array([0, 0.0, 0.65])
+        target   = jnp.array([1., 0.0, 0.65])
         dist     = jnp.linalg.norm(target - body_pos)
         reward_dist   = jnp.exp(-5*dist)
+
 
         reward = (
             reward_dist
         )
         reward = jnp.clip(reward, -1.0, 5.0)
 
+        fallen = (
+            (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))
+        
+        )
+        done = jnp.where(fallen | (i>= 300), 1, 0)
+
+
         # ---------- termination ----------
         # fallen = (
         #     (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))
         
         # )
-        done = i > 300
+        # done = i > 100
         
         print(reward)
         print(done)
         
-
+        # print(pitch)
         # print(action - jnp.array(cfg["PPO"]["default_qpos"]))
-
         # print(action)
         i = i + 1
         # print(i)
-        # print(mj_data.ctrl[:])
+        
         # 3. physics stepping until next control tick
         sim_t0 = mj_data.time
         while (mj_data.time - sim_t0) < DT_CONTROL:
@@ -174,7 +193,7 @@ with viewer.launch_passive(mj_model, mj_data) as v:
             joint_vel = mj_data.qvel[6:]
             ctrl = jnp.array(cfg["PPO"]["stiffness"]) * (action - joint_pos) - jnp.array(cfg["PPO"]["damping"]) * (joint_vel)
             # print(ctrl)
-            ctrl.clip(-jnp.array(cfg["PPO"]["torque_limit"]), jnp.array(cfg["PPO"]["torque_limit"]))
+            ctrl = ctrl.clip(-jnp.array(cfg["PPO"]["torque_limit"]), jnp.array(cfg["PPO"]["torque_limit"]))
             mj_data.ctrl[:] = np.asarray(ctrl, dtype=np.float64) 
 
             mujoco.mj_step(mj_model, mj_data)

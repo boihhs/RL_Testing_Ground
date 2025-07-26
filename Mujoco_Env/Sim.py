@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import jax.tree_util
 from functools import partial
 
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class SimCfg:
@@ -22,6 +23,18 @@ class SimCfg:
     std_joint_pos: int     = field(metadata={'static': True})
     std_joint_vel: int     = field(metadata={'static': True})
 
+    std_body_mass: int     = field(metadata={'static': True})
+    std_body_inertia: int     = field(metadata={'static': True})
+    std_body_ipos: int     = field(metadata={'static': True})
+    std_geom_friction: int     = field(metadata={'static': True})
+    std_dof_armature: int     = field(metadata={'static': True})
+    std_dof_frictionloss: int     = field(metadata={'static': True})
+    std_stiffness: int     = field(metadata={'static': True})
+    std_damping: int     = field(metadata={'static': True})
+
+    std_qpos: int     = field(metadata={'static': True})
+    std_qvel: int     = field(metadata={'static': True})
+
     stiffness: jnp.array = field(metadata={'static': True})
     damping: jnp.array = field(metadata={'static': True})
     tau_limits: jnp.array = field(metadata={'static': True})
@@ -32,8 +45,18 @@ class Sensor:
     id: str     = field(metadata={'static': True})
     start: int     = field(metadata={'static': True})
     length: int     = field(metadata={'static': True})
- 
 
+@jax.tree_util.register_dataclass
+@dataclass
+class ENVS:
+    mjx_data: mjx.Data
+    mjx_model: mjx.Model
+    step_num: jax.Array
+    stiffness: jax.Array
+    damping: jax.Array
+    key: jax.Array 
+
+ 
 @jax.tree_util.register_pytree_node_class
 class Sim:
     def __init__(self, cfg: SimCfg):
@@ -53,70 +76,161 @@ class Sim:
 
         self.right_foot_pos_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "right_foot_link")
         self.left_foot_pos_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "left_foot_link")
-        
-        
 
     @jax.jit
-    @partial(jax.vmap, in_axes=(None, 0, 0, 0), out_axes=(0, 0))
-    def step(self, d, action, step_num):
-        phyics_steps_per_model = int((1/self.cfg.model_freq) / self.timestep)
+    def generate_mjx_model(self, key):
+        mjx_model = self.mjx_model
 
-        step_num = step_num + 1
+        key, subkey = jax.random.split(key)
+        body_mass = mjx_model.body_mass * (1. + jax.random.normal(subkey,  mjx_model.body_mass.shape) * self.cfg.std_body_mass)
+        body_mass = jnp.clip(body_mass, a_min=0.0)
+
+        key, subkey = jax.random.split(key)
+        body_inertia = mjx_model.body_inertia * (1. + jax.random.normal(subkey,  mjx_model.body_inertia.shape) * self.cfg.std_body_inertia)
+        body_inertia = jnp.clip(body_inertia, a_min=0)
+
+        key, subkey = jax.random.split(key)
+        delta = (jax.random.normal(subkey,  mjx_model.body_ipos.shape) * self.cfg.std_body_ipos).clip(-.02, .02)
+        body_ipos = mjx_model.body_ipos + delta
         
-        def _step(context, _):
-            d, action = context
+        key, subkey = jax.random.split(key)
+        geom_friction = mjx_model.geom_friction * (1. + jax.random.normal(subkey,  mjx_model.geom_friction.shape) * self.cfg.std_geom_friction)
+        geom_friction = jnp.clip(geom_friction, a_min=0.0, a_max=1.0)
+
+        key, subkey = jax.random.split(key)
+        dof_frictionloss = mjx_model.dof_frictionloss + (1. + jax.random.normal(subkey,  mjx_model.dof_frictionloss.shape) * self.cfg.std_dof_frictionloss)
+        dof_frictionloss = jnp.clip(dof_frictionloss, a_min=0.0)
+
+        key, subkey = jax.random.split(key)
+        dof_armature = mjx_model.dof_armature + (1. + jax.random.normal(subkey,  mjx_model.dof_armature.shape) * self.cfg.std_dof_armature)
+        dof_armature = jnp.clip(dof_armature, a_min=0.0)
+
+        mjx_model = mjx_model.replace(body_mass = body_mass,
+                                        body_inertia = body_inertia,
+                                        body_ipos = body_ipos,
+                                        geom_friction = geom_friction,
+                                        dof_frictionloss = dof_frictionloss,
+                                        dof_armature = dof_armature)
+        
+        return mjx_model
+
+    @partial(jax.vmap, in_axes=(None, 0, 0), out_axes=(0))
+    @jax.jit
+    def step(self, envs: ENVS, action):
+        stiffness = envs.stiffness
+        damping = envs.damping
+
+        phyics_steps_per_model = int((1/self.cfg.model_freq) / self.timestep)
+        step_num = envs.step_num + 1
+        
+        def __step(context, _):
+            d, m, action = context
 
             joint_pos = d.qpos[7:]
             joint_vel = d.qvel[6:]
-            ctrl = self.cfg.stiffness * (action - joint_pos) - self.cfg.damping * (joint_vel)
+            ctrl = stiffness * (action - joint_pos) - damping * (joint_vel)
             ctrl = ctrl.clip(-self.cfg.tau_limits, self.cfg.tau_limits)
             d = d.replace(ctrl = ctrl)
             
-            d = mjx.step(self.mjx_model, d)  
-            return (d, action), None
+            d = mjx.step(m, d)  
+            return (d, m, action), None
         
-        (d, _), _ = jax.lax.scan(_step, (d, action), None, length=phyics_steps_per_model)
+        (d, _, _), _ = jax.lax.scan(__step, (envs.mjx_data, envs.mjx_model, action), None, length=phyics_steps_per_model)  
         
-        
-        return d, step_num
+        return ENVS(d, envs.mjx_model, step_num, envs.stiffness, envs.damping, envs.key)
     
     @jax.jit
-    @partial(jax.vmap, in_axes=(None, 0), out_axes=(0))
-    def get_collision(self, d, geom1: int, geom2: int):
-        contact = d._impl.contact
-        mask = (jnp.array([geom1, geom2]) == contact.geom).all(axis=1)
-        mask |= (jnp.array([geom2, geom1]) == contact.geom).all(axis=1)
-        idx = jnp.where(mask, contact.dist, 1e4).argmin()
-        dist = contact.dist[idx] * mask[idx]
-        normal = (dist < 0) * contact.frame[idx, 0, :3]
-        return dist < 0
+    def _get_collision(self, envs: ENVS, geom1, geom2):
+        @partial(jax.vmap, in_axes=(0, None, None), out_axes=(0))
+        def _get_collision(d, geom1: int, geom2: int):
+            contact = d._impl.contact
+            mask = (jnp.array([geom1, geom2]) == contact.geom).all(axis=1)
+            mask |= (jnp.array([geom2, geom1]) == contact.geom).all(axis=1)
+            idx = jnp.where(mask, contact.dist, 1e4).argmin()
+            dist = contact.dist[idx] * mask[idx]
+            normal = (dist < 0) * contact.frame[idx, 0, :3]
+            return dist < 0
+        return _get_collision(envs.mjx_data, geom1, geom2)
     
     @jax.jit
-    def reset(self):
+    def reset(self, key):
         mj_data = mujoco.MjData(self.mj_model)
 
-        @partial(jax.vmap, in_axes=(0), out_axes=(0))
-        def _reset(_):
+        key, subkey = jax.random.split(key)
+        keys = jax.random.split(subkey, int(self.cfg.batch))
+
+        @jax.vmap
+        def _reset(key):
             mjx_data = mjx.put_data(self.mj_model, mj_data)
-            mjx_data = mjx_data.replace(qpos = self.cfg.init_pos, qvel = self.cfg.init_vel)
-            return mjx_data
-    
-        seq = jnp.arange(self.cfg.batch)
-        return _reset(seq), jnp.zeros((self.cfg.batch,), dtype=jnp.int32)
+
+            key, subkey = jax.random.split(key)
+            qpos = self.cfg.init_pos + jax.random.normal(subkey,  self.cfg.init_pos.shape) * self.cfg.std_qpos
+            key, subkey = jax.random.split(key)
+            qvel = self.cfg.init_vel + jax.random.normal(subkey,  self.cfg.init_vel.shape) * self.cfg.std_qvel
+
+            mjx_data = mjx_data.replace(qpos = qpos, qvel = qvel)
+            mjx_model = self.generate_mjx_model(key)
+
+            key, subkey = jax.random.split(key)
+            stiffness = self.cfg.stiffness * (1 + jax.random.normal(subkey,  self.cfg.stiffness.shape) * self.cfg.std_stiffness)
+            stiffness = jnp.clip(stiffness, a_min=0.0)
+
+            key, subkey = jax.random.split(key)
+            damping = self.cfg.damping * (1 + jax.random.normal(subkey,  self.cfg.damping.shape) * self.cfg.std_damping)
+            damping = jnp.clip(damping, a_min=0.0)
+            
+            key, subkey = jax.random.split(key)
+            step_num = 0
+
+            return ENVS(mjx_data, mjx_model, step_num, stiffness, damping, subkey)
+
+        return _reset(keys)
     
   
     @jax.jit
-    def reset_partial(self, d , dones, step_nums):
-        @partial(jax.vmap, in_axes=(0, 0), out_axes=(0))
-        def _reset(d, done):
+    def reset_partial(self, envs: ENVS, dones):
+
+        @jax.vmap
+        def _reset(env: ENVS, done):
+            d = env.mjx_data
+            m = env.mjx_model
+
             mask = (done > 0)
-            d = d.replace(qpos = self.cfg.init_pos * mask + d.qpos * (1 - mask), qvel = self.cfg.init_vel * mask + d.qvel * (1 - mask))
-            return d
-    
-        return _reset(d, dones), jnp.where(dones > 0, 0, step_nums)
+
+            key, subkey = jax.random.split(env.key)
+            qpos = self.cfg.init_pos + jax.random.normal(subkey,  self.cfg.init_pos.shape) * self.cfg.std_qpos
+            key, subkey = jax.random.split(key)
+            qvel = self.cfg.init_vel + jax.random.normal(subkey,  self.cfg.init_vel.shape) * self.cfg.std_qvel
+
+            d = d.replace(
+                qpos=jnp.where(mask, qpos, d.qpos),
+                qvel=jnp.where(mask, qvel, d.qvel),
+            )   
+
+            m = jax.lax.cond(
+                mask,
+                lambda _: self.generate_mjx_model(key),
+                lambda _: m,
+                operand=None,
+            )
+
+            key, subkey = jax.random.split(env.key)
+            stiffness = jnp.where(mask, self.cfg.stiffness * (1 + jax.random.normal(subkey,  self.cfg.stiffness.shape) * self.cfg.std_stiffness), env.stiffness)
+            stiffness = jnp.clip(stiffness, a_min=0.0)
+           
+            key, subkey = jax.random.split(key)
+            damping = jnp.where(mask, self.cfg.damping * (1 + jax.random.normal(subkey,  self.cfg.damping.shape) * self.cfg.std_damping), env.damping)
+            damping = jnp.clip(damping, a_min=0.0)
+
+            step_num = jnp.where(done > 0, 0, env.step_num)
+
+            return ENVS(d, m, step_num, stiffness, damping, key)
+        
+        return _reset(envs, dones)
     
     @jax.jit
-    def getObs(self, d, key):
+    def getObs(self, envs: ENVS, key):
+
         keys = jax.random.split(key, int(self.cfg.batch))
 
         @partial(jax.vmap, in_axes=(0, 0), out_axes=(0))
@@ -134,11 +248,11 @@ class Sim:
             prev_ctrl = d.ctrl[:]
 
             key, subkey = jax.random.split(key)
-            noise_joint_pos = self.cfg.std_gyro * jax.random.normal(subkey, joint_pos.shape)
+            noise_joint_pos = self.cfg.std_joint_pos * jax.random.normal(subkey, joint_pos.shape)
             joint_pos = joint_pos + noise_joint_pos
 
             key, subkey = jax.random.split(key)
-            noise_joint_vel = self.cfg.std_acc * jax.random.normal(subkey, joint_vel.shape)
+            noise_joint_vel = self.cfg.std_joint_vel * jax.random.normal(subkey, joint_vel.shape)
             joint_vel = joint_vel + noise_joint_vel
 
             key, subkey = jax.random.split(key)
@@ -151,7 +265,7 @@ class Sim:
             
             return jnp.concatenate([prev_ctrl, joint_pos, joint_vel, base_ang_vel, base_lin_accel, quat, body_pos, body_vel, right_foot_pos, left_foot_pos], axis=-1)
         
-        return _get_obs(d, keys)
+        return _get_obs(envs.mjx_data, keys)
 
 
     def tree_flatten(self):
