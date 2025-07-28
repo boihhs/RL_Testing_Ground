@@ -35,7 +35,7 @@ class PPO:
             self.cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
 
         env_cfg = SimCfg(self.cfg["PPO"]["xml_path"], self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["model_freq"], jnp.array(self.cfg["PPO"]["init_pos"]), jnp.array(self.cfg["PPO"]["init_vel"]), 
-                         self.cfg["STD"]["std_gyro"], self.cfg["STD"]["std_acc"], self.cfg["STD"]["std_joint_pos"], self.cfg["STD"]["std_joint_vel"], self.cfg["STD"]["std_body_mass"], self.cfg["STD"]["std_body_inertia"], self.cfg["STD"]["std_body_ipos"], self.cfg["STD"]["std_geom_friction"], self.cfg["STD"]["std_dof_armature"], self.cfg["STD"]["std_dof_frictionloss"], self.cfg["STD"]["std_stiffness"], self.cfg["STD"]["std_damping"], self.cfg["STD"]["std_qpos"], self.cfg["STD"]["std_qvel"],
+                         self.cfg["STD"]["std_gyro"], self.cfg["STD"]["std_acc"], self.cfg["STD"]["std_joint_pos"], self.cfg["STD"]["std_joint_vel"], self.cfg["STD"]["std_body_mass"], self.cfg["STD"]["std_body_inertia"], self.cfg["STD"]["std_body_ipos"], self.cfg["STD"]["std_geom_friction"], self.cfg["STD"]["std_dof_armature"], self.cfg["STD"]["std_dof_frictionloss"], self.cfg["STD"]["std_stiffness"], self.cfg["STD"]["std_damping"], self.cfg["STD"]["std_qpos"], self.cfg["STD"]["std_qvel"], self.cfg["STD"]["std_force"],
                          jnp.array(self.cfg["PPO"]["stiffness"]), jnp.array(self.cfg["PPO"]["damping"]), jnp.array(self.cfg["PPO"]["torque_limit"]))
         self.env = Sim(env_cfg)
 
@@ -45,18 +45,39 @@ class PPO:
         self.key, subkey = jax.random.split(self.key)
         policy = Policy(jnp.array(self.cfg["PPO"]["policy_model_shape"]), jnp.array(self.cfg["PPO"]["default_qpos"]), subkey)
         
-        self.buffer = ReplayBuffer(self.cfg["PPO"]["horizon_length"] * (self.cfg["PPO"]["batch_size"]), self.cfg["PPO"]["total_obs_dim"], self.cfg["PPO"]["action_dim"], self.cfg["PPO"]["mini_batch_size"])
+        self.buffer = ReplayBuffer(self.cfg["PPO"]["horizon_length"] * (self.cfg["PPO"]["batch_size"]), self.cfg["PPO"]["value_state_dim"], self.cfg["PPO"]["action_dim"], self.cfg["PPO"]["mini_batch_size"])
+
+        transition_steps = int((self.cfg["PPO"]["mini_batch_loops"] * self.cfg["PPO"]["num_epocs"]) // 20)
+
+        lr_schedule_policy = optax.exponential_decay(
+            init_value=float(self.cfg["PPO"]["learning_rate_policy"]),
+            transition_steps=transition_steps,
+            decay_rate=0.99,
+            staircase=True
+        )
+        lr_schedule_value = optax.exponential_decay(
+            init_value=float(self.cfg["PPO"]["learning_rate_value"]),
+            transition_steps=transition_steps,
+            decay_rate=0.99,
+            staircase=True
+        )
 
         policy_opt = optax.chain(
             optax.clip_by_global_norm(0.5),
-            optax.adam(learning_rate=float(self.cfg["PPO"]["learning_rate_policy"]))
+            optax.adamw(
+                learning_rate=lr_schedule_policy,
+                weight_decay=float(self.cfg["PPO"]["weight_decay"])
+            )
         )
         policy_opt_state = policy_opt.init(policy)
         self.policy_container = ModelContainer(policy, policy_opt, policy_opt_state)
 
         value_1_opt = optax.chain(
             optax.clip_by_global_norm(0.5),
-            optax.adam(learning_rate=float(self.cfg["PPO"]["learning_rate_value"]))
+            optax.adamw(
+                learning_rate=lr_schedule_value,
+                weight_decay=float(self.cfg["PPO"]["weight_decay"])
+            )
         )
         value_1_opt_state = value_1_opt.init(value_1)
         self.value_1_container = ModelContainer(value_1, value_1_opt, value_1_opt_state)
@@ -124,6 +145,7 @@ class PPO:
         jax.debug.print("policy_loss mean? {}", jnp.mean(policy_loss))
         jax.debug.print("bound_loss mean? {}", jnp.mean(bound_loss))
         jax.debug.print("entropy_loss mean? {}", jnp.mean(entropy_loss))
+        jax.debug.print("value mean {}", jnp.mean(values))
         
         return loss
         
@@ -146,6 +168,7 @@ class PPO:
             key, subkey = jax.random.split(key)
             current_env_obs = self.env.getObs(envs, subkey)
             policy_obs = current_env_obs[:, :self.cfg["PPO"]["policy_state_dim"]]
+            value_obs = current_env_obs[:, :self.cfg["PPO"]["value_state_dim"]]
 
             key, subkey = jax.random.split(key)
             actions = policy.get_action(policy_obs, subkey)
@@ -157,7 +180,9 @@ class PPO:
             next_envs = self.env.step(envs, actions)
 
             key, subkey = jax.random.split(key)
-            buffer = buffer.add_batch_PPO(current_env_obs, actions, rewards, self.env.getObs(next_envs, subkey), dones)
+            next_env_obs = self.env.getObs(next_envs, subkey)
+            next_value_obs = next_env_obs[:, :self.cfg["PPO"]["value_state_dim"]]
+            buffer = buffer.add_batch_PPO(value_obs, actions, rewards, next_value_obs, dones)
             buffer = jax.tree_util.tree_map(jax.lax.stop_gradient, buffer)
             
             return (next_envs, buffer, policy, key), None
@@ -230,67 +255,66 @@ class PPO:
 
 
     @jax.jit
-    def get_reward_and_dones(self, envs, actions, step_counters):
+    def get_reward_and_dones(self, obs, actions, step_counters):
 
         @partial(jax.vmap, in_axes=(0, 0, 0), out_axes=(0, 0))
-        def _get_reward_and_done_helper(envs, actions, step_counter):
-            current_ctrl = envs[:23]
-            joint_pos = envs[23:46]
-            joint_vel = envs[46:69]
-            base_ang_vel = envs[69:72]
-            base_lin_accel = envs[72:75]
-            quat = envs[75:79]
-            body_pos = envs[79:82]
-            body_vel = envs[82:85]
-            right_foot_pos = envs[85:88]
-            left_foot_pos = envs[88:91]
+        def _get_reward_and_done_helper(obs, actions, step_counter):
 
             def _quat_to_small_euler(q):
                 qw, qx, qy, qz = q
-                pitch = jnp.arcsin(jnp.clip(2 * (qw*qy - qz*qx), -1.0, 1.0))
-                roll  = jnp.arctan2(2 * (qw*qx + qy*qz), 1 - 2 * (qx*qx + qy*qy))
-                return pitch, roll
+                # Yaw (around z-axis)
+                yaw = jnp.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy*qy + qz*qz))
+                # Pitch (around y-axis)
+                pitch = jnp.arcsin(jnp.clip(2*(qw*qy - qz*qx), -1.0, 1.0))
+                # Roll (around x-axis)
+                roll = jnp.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx*qx + qy*qy))
+                return pitch, roll, yaw
             
-            pitch, roll = _quat_to_small_euler(quat)
+            current_ctrl           = obs[:23]
+            joint_pos              = obs[23:46]
+            joint_vel              = obs[46:69]
+            base_ang_vel           = obs[69:72]
+            base_lin_accel         = obs[72:75]
+            quat                   = obs[75:79]
+            body_pos               = obs[79:82]
+            body_vel               = obs[82:85]
+            right_foot_pos         = obs[85:88]
+            left_foot_pos          = obs[88:91]
+            right_foot_vel         = obs[91:94]
+            left_foot_vel          = obs[94:97]
+            right_foot_ang_vel     = obs[97:100]
+            left_foot_ang_vel      = obs[100:103]
+            right_foot_force       = obs[103:106]
+            left_foot_force        = obs[106:109]
+            right_foot_moment      = obs[109:112]
+            left_foot_ang_moment   = obs[112:115]
+            right_foot_ground_contact = obs[115]
+            left_foot_ground_contact  = obs[116]
 
-            goal_vx = .2
-            goal_height = .6
+            pitch, roll, yaw = _quat_to_small_euler(quat)
 
-            survial = 1 * .025
-            velocity_tracking_x = jnp.exp(-(goal_vx - body_vel[0])**2)
-            velocity_tracking_y = jnp.exp(-(body_vel[1])**2)
-            # velocity_tracking_yaw = jnp.exp(-(body_vel[2])**2)
-            base_height = (goal_height - body_pos[2])**2 * -20
-            torque = jnp.linalg.norm(current_ctrl) * -2e-4
-            torque_tired = jnp.linalg.norm(current_ctrl/jnp.array(self.cfg["PPO"]["torque_limit"])) * -1e-2
-            power = jnp.maximum(jnp.sum(current_ctrl * joint_vel), 0) * -2e-4
-            lin_vel_z = (body_vel[2])**2 * -2
-            ang_vel_xy = jnp.linalg.norm(base_ang_vel[:2]) * -.2
-            joint_vel_reward = jnp.linalg.norm(joint_vel) * -1e-4
-            base_accel = (jnp.linalg.norm(body_vel) + jnp.linalg.norm(base_ang_vel)) * -1e-4
-            # action_rate = 
-            joint_pos_limit = jnp.sum(jnp.where(joint_pos > jnp.array(self.cfg["PPO"]["joint_q_max"]), 1, 0) + jnp.where(joint_pos < jnp.array(self.cfg["PPO"]["joint_q_min"]), 1, 0)) * -1.
-            # collison = 
-            feet_z = (right_foot_pos[2] + left_foot_pos[2]) * 3
+            
+            z_height_reward = jnp.exp(-10 * (body_pos[2] - 0.65)**2)
+            joint_vel_penalty = jnp.exp(-1e-1 * jnp.linalg.norm(joint_vel)**2)
+            base_vel_penalty = jnp.exp(-2 * jnp.linalg.norm(body_vel)**2)
+            upright_reward = jnp.exp(-10 * (pitch**2 + roll**2))
 
             reward = (
-                survial + velocity_tracking_x + velocity_tracking_y + base_height + torque
-                + torque_tired + power + lin_vel_z + ang_vel_xy + joint_vel_reward + 
-                base_accel + joint_pos_limit + feet_z
+                2.0 * upright_reward +
+                2.0 * z_height_reward +
+                1.0 * base_vel_penalty +
+                0.5 * joint_vel_penalty
             )
 
-            reward = jnp.clip(reward, min=0)
+            # ---------- termination conditions -----------------------------------
+            too_tilt = (jnp.abs(pitch) > jnp.deg2rad(30)) | (jnp.abs(roll) > jnp.deg2rad(30))
+            too_low = body_pos[2] < 0.4
+            done = jnp.where(too_tilt | too_low | (step_counter >= self.cfg["PPO"]["max_timesteps"]), 1, 0)
 
-            fallen = (
-                (jnp.abs(pitch) > jnp.deg2rad(10)) | (jnp.abs(roll)  > jnp.deg2rad(10))
-            
-            )
-            done = jnp.where(fallen | (step_counter >= self.cfg["PPO"]["max_timesteps"]), 1, 0)
 
             return reward, done
 
-        
-        return _get_reward_and_done_helper(envs, actions, step_counters)
+        return _get_reward_and_done_helper(obs, actions, step_counters)
     
 
     def tree_flatten(self):

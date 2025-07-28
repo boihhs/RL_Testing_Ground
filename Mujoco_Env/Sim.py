@@ -34,6 +34,7 @@ class SimCfg:
 
     std_qpos: int     = field(metadata={'static': True})
     std_qvel: int     = field(metadata={'static': True})
+    std_force: int     = field(metadata={'static': True})
 
     stiffness: jnp.array = field(metadata={'static': True})
     damping: jnp.array = field(metadata={'static': True})
@@ -54,6 +55,7 @@ class ENVS:
     step_num: jax.Array
     stiffness: jax.Array
     damping: jax.Array
+    force_applied: jax.Array
     key: jax.Array 
 
  
@@ -74,8 +76,13 @@ class Sim:
         lin_accel_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_SENSOR, "linear-acceleration")
         self.lin_accel_sensor = Sensor(lin_accel_id, self.mjx_model.sensor_adr[lin_accel_id], self.mjx_model.sensor_dim[lin_accel_id])
 
-        self.right_foot_pos_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "right_foot_link")
-        self.left_foot_pos_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "left_foot_link")
+        self.right_foot_body_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "right_foot_link")
+        self.left_foot_body_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "left_foot_link")
+        self.body_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "Trunk")
+
+        self.right_foot_geom_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "right_foot_geom")
+        self.left_foot_geom_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "left_foot_geom")
+        self.ground_geom_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
     @jax.jit
     def generate_mjx_model(self, key):
@@ -119,38 +126,40 @@ class Sim:
     def step(self, envs: ENVS, action):
         stiffness = envs.stiffness
         damping = envs.damping
+        mjx_data = envs.mjx_data
 
         phyics_steps_per_model = int((1/self.cfg.model_freq) / self.timestep)
         step_num = envs.step_num + 1
+
+        xfrc_applied_body = jnp.zeros(mjx_data.xfrc_applied[self.body_id].shape).at[3:].set(envs.force_applied)
+        xfrc_applied = jnp.zeros(mjx_data.xfrc_applied.shape).at[self.body_id].set(xfrc_applied_body)
         
         def __step(context, _):
-            d, m, action = context
+            d, m, action, xfrc_applied = context
 
             joint_pos = d.qpos[7:]
             joint_vel = d.qvel[6:]
             ctrl = stiffness * (action - joint_pos) - damping * (joint_vel)
             ctrl = ctrl.clip(-self.cfg.tau_limits, self.cfg.tau_limits)
-            d = d.replace(ctrl = ctrl)
+            d = d.replace(ctrl = ctrl, xfrc_applied = xfrc_applied)
             
             d = mjx.step(m, d)  
-            return (d, m, action), None
+            return (d, m, action, xfrc_applied), None
         
-        (d, _, _), _ = jax.lax.scan(__step, (envs.mjx_data, envs.mjx_model, action), None, length=phyics_steps_per_model)  
+        (d, _, _, _), _ = jax.lax.scan(__step, (envs.mjx_data, envs.mjx_model, action, xfrc_applied), None, length=phyics_steps_per_model)  
         
-        return ENVS(d, envs.mjx_model, step_num, envs.stiffness, envs.damping, envs.key)
+        return ENVS(d, envs.mjx_model, step_num, envs.stiffness, envs.damping, envs.force_applied, envs.key)
     
+    # From mujoco playground
     @jax.jit
-    def _get_collision(self, envs: ENVS, geom1, geom2):
-        @partial(jax.vmap, in_axes=(0, None, None), out_axes=(0))
-        def _get_collision(d, geom1: int, geom2: int):
-            contact = d._impl.contact
-            mask = (jnp.array([geom1, geom2]) == contact.geom).all(axis=1)
-            mask |= (jnp.array([geom2, geom1]) == contact.geom).all(axis=1)
-            idx = jnp.where(mask, contact.dist, 1e4).argmin()
-            dist = contact.dist[idx] * mask[idx]
-            normal = (dist < 0) * contact.frame[idx, 0, :3]
-            return dist < 0
-        return _get_collision(envs.mjx_data, geom1, geom2)
+    def get_collision(self, d, geom1: int, geom2: int):
+        contact = d._impl.contact
+        mask = (jnp.array([geom1, geom2]) == contact.geom).all(axis=1)
+        mask |= (jnp.array([geom2, geom1]) == contact.geom).all(axis=1)
+        idx = jnp.where(mask, contact.dist, 1e4).argmin()
+        dist = contact.dist[idx] * mask[idx]
+        # normal = (dist < 0) * contact.frame[idx, 0, :3]
+        return dist < 0
     
     @jax.jit
     def reset(self, key):
@@ -167,8 +176,9 @@ class Sim:
             qpos = self.cfg.init_pos + jax.random.normal(subkey,  self.cfg.init_pos.shape) * self.cfg.std_qpos
             key, subkey = jax.random.split(key)
             qvel = self.cfg.init_vel + jax.random.normal(subkey,  self.cfg.init_vel.shape) * self.cfg.std_qvel
-
+            
             mjx_data = mjx_data.replace(qpos = qpos, qvel = qvel)
+
             mjx_model = self.generate_mjx_model(key)
 
             key, subkey = jax.random.split(key)
@@ -180,9 +190,11 @@ class Sim:
             damping = jnp.clip(damping, a_min=0.0)
             
             key, subkey = jax.random.split(key)
+            force_applied = jax.random.normal(subkey,  mjx_data.xfrc_applied[self.body_id][3:].shape) * self.cfg.std_force
+
             step_num = 0
 
-            return ENVS(mjx_data, mjx_model, step_num, stiffness, damping, subkey)
+            return ENVS(mjx_data, mjx_model, step_num, stiffness, damping, force_applied, subkey)
 
         return _reset(keys)
     
@@ -222,9 +234,12 @@ class Sim:
             damping = jnp.where(mask, self.cfg.damping * (1 + jax.random.normal(subkey,  self.cfg.damping.shape) * self.cfg.std_damping), env.damping)
             damping = jnp.clip(damping, a_min=0.0)
 
+            key, subkey = jax.random.split(key)
+            force_applied = jnp.where(mask, jax.random.normal(subkey,  d.xfrc_applied[self.body_id][3:].shape) * self.cfg.std_force, env.force_applied)
+
             step_num = jnp.where(done > 0, 0, env.step_num)
 
-            return ENVS(d, m, step_num, stiffness, damping, key)
+            return ENVS(d, m, step_num, stiffness, damping, force_applied, key)
         
         return _reset(envs, dones)
     
@@ -240,10 +255,23 @@ class Sim:
             body_vel = d.qvel[:3]
             joint_pos = d.qpos[7:]
             joint_vel = d.qvel[6:]
+
             base_ang_vel = d.sensordata[self.ang_vel_sensor.start:self.ang_vel_sensor.start + self.ang_vel_sensor.length]
             base_lin_accel = d.sensordata[self.lin_accel_sensor.start:self.lin_accel_sensor.start + self.lin_accel_sensor.length]
-            right_foot_pos = d.xpos[self.right_foot_pos_id]
-            left_foot_pos = d.xpos[self.left_foot_pos_id]
+
+            right_foot_pos = d.xpos[self.right_foot_body_id]
+            right_foot_vel = d.cvel[self.right_foot_body_id][3:]
+            right_foot_ang_vel = d.cvel[self.right_foot_body_id][:3]
+            right_foot_force = d._impl.cfrc_ext[self.right_foot_body_id][3:]
+            right_foot_moment = d._impl.cfrc_ext[self.right_foot_body_id][:3]
+            right_foot_ground_contact = self.get_collision(d, self.right_foot_geom_id, self.ground_geom_id)
+
+            left_foot_pos = d.xpos[self.left_foot_body_id]
+            left_foot_vel = d.cvel[self.left_foot_body_id][3:]
+            left_foot_ang_vel = d.cvel[self.left_foot_body_id][:3]
+            left_foot_force = d._impl.cfrc_ext[self.left_foot_body_id][3:]
+            left_foot_ang_moment = d._impl.cfrc_ext[self.left_foot_body_id][:3]
+            left_foot_ground_contact = self.get_collision(d, self.left_foot_geom_id, self.ground_geom_id)
 
             prev_ctrl = d.ctrl[:]
 
@@ -262,19 +290,30 @@ class Sim:
             key, subkey = jax.random.split(key)
             noise_lin_accel = self.cfg.std_acc * jax.random.normal(subkey, base_lin_accel.shape)
             base_lin_accel = base_lin_accel + noise_lin_accel
+
+            obs = jnp.concatenate([
+                prev_ctrl, joint_pos, joint_vel, base_ang_vel, base_lin_accel, quat, 
+                body_pos, body_vel,
+                right_foot_pos, left_foot_pos,
+                right_foot_vel, left_foot_vel,
+                right_foot_ang_vel, left_foot_ang_vel,
+                right_foot_force, left_foot_force,
+                right_foot_moment, left_foot_ang_moment,
+                jnp.array([right_foot_ground_contact, left_foot_ground_contact])
+            ], axis=-1)
             
-            return jnp.concatenate([prev_ctrl, joint_pos, joint_vel, base_ang_vel, base_lin_accel, quat, body_pos, body_vel, right_foot_pos, left_foot_pos], axis=-1)
+            return obs
         
         return _get_obs(envs.mjx_data, keys)
 
 
     def tree_flatten(self):
-        return (), (self.cfg, self.mj_model, self.mjx_model, self.timestep, self.ang_vel_sensor, self.lin_accel_sensor, self.right_foot_pos_id, self.left_foot_pos_id)
+        return (), (self.cfg, self.mj_model, self.mjx_model, self.timestep, self.ang_vel_sensor, self.lin_accel_sensor, self.right_foot_body_id, self.left_foot_body_id, self.body_id, self.right_foot_geom_id, self.left_foot_geom_id, self.ground_geom_id)
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        cfg, mj_model, mjx_model, timestep, ang_vel_sensor, lin_accel_sensor, right_foot_pos_id, left_foot_pos_id = aux
+        cfg, mj_model, mjx_model, timestep, ang_vel_sensor, lin_accel_sensor, right_foot_body_id, left_foot_body_id, body_id, right_foot_geom_id, left_foot_geom_id, ground_geom_id = aux
         obj = cls.__new__(cls)
-        obj.cfg, obj.mj_model, obj.mjx_model, obj.timestep, obj.ang_vel_sensor, obj.lin_accel_sensor, obj.right_foot_pos_id, obj.left_foot_pos_id = cfg, mj_model, mjx_model, timestep, ang_vel_sensor, lin_accel_sensor, right_foot_pos_id, left_foot_pos_id
+        obj.cfg, obj.mj_model, obj.mjx_model, obj.timestep, obj.ang_vel_sensor, obj.lin_accel_sensor, obj.right_foot_body_id, obj.left_foot_body_id, obj.body_id, obj.right_foot_geom_id, obj.left_foot_geom_id, obj.ground_geom_id = cfg, mj_model, mjx_model, timestep, ang_vel_sensor, lin_accel_sensor, right_foot_body_id, left_foot_body_id, body_id, right_foot_geom_id, left_foot_geom_id, ground_geom_id
         return obj
     
