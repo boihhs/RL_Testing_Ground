@@ -49,9 +49,19 @@ class Sensor:
 
 @jax.tree_util.register_dataclass
 @dataclass
+class MODEL:
+    body_mass: jax.Array 
+    body_inertia: jax.Array 
+    body_ipos: jax.Array 
+    geom_friction: jax.Array 
+    dof_frictionloss: jax.Array 
+    dof_armature: jax.Array 
+
+@jax.tree_util.register_dataclass
+@dataclass
 class ENVS:
     mjx_data: mjx.Data
-    mjx_model: mjx.Model
+    model: MODEL
     step_num: jax.Array
     stiffness: jax.Array
     damping: jax.Array
@@ -112,27 +122,31 @@ class Sim:
         dof_armature = mjx_model.dof_armature + (1. + jax.random.normal(subkey,  mjx_model.dof_armature.shape) * self.cfg.std_dof_armature)
         dof_armature = jnp.clip(dof_armature, a_min=0.0)
 
-        mjx_model = mjx_model.replace(body_mass = body_mass,
-                                        body_inertia = body_inertia,
-                                        body_ipos = body_ipos,
-                                        geom_friction = geom_friction,
-                                        dof_frictionloss = dof_frictionloss,
-                                        dof_armature = dof_armature)
-        
-        return mjx_model
+        model = MODEL(body_mass, body_inertia, body_ipos, geom_friction, dof_frictionloss, dof_armature)
+
+        return model
 
     @partial(jax.vmap, in_axes=(None, 0, 0), out_axes=(0))
     @jax.jit
     def step(self, envs: ENVS, action):
+        mjx_model = self.mjx_model
         stiffness = envs.stiffness
         damping = envs.damping
         mjx_data = envs.mjx_data
+        model = envs.model
 
         phyics_steps_per_model = int((1/self.cfg.model_freq) / self.timestep)
         step_num = envs.step_num + 1
 
-        xfrc_applied_body = jnp.zeros(mjx_data.xfrc_applied[self.body_id].shape).at[3:].set(envs.force_applied)
+        xfrc_applied_body = jnp.zeros(mjx_data.xfrc_applied[self.body_id].shape).at[3:5].set(envs.force_applied)
         xfrc_applied = jnp.zeros(mjx_data.xfrc_applied.shape).at[self.body_id].set(xfrc_applied_body)
+
+        mjx_model = mjx_model.replace(body_mass = model.body_mass,
+                                        body_inertia = model.body_inertia,
+                                        body_ipos = model.body_ipos,
+                                        geom_friction = model.geom_friction,
+                                        dof_frictionloss = model.dof_frictionloss,
+                                        dof_armature = model.dof_armature)
         
         def __step(context, _):
             d, m, action, xfrc_applied = context
@@ -146,9 +160,11 @@ class Sim:
             d = mjx.step(m, d)  
             return (d, m, action, xfrc_applied), None
         
-        (d, _, _, _), _ = jax.lax.scan(__step, (envs.mjx_data, envs.mjx_model, action, xfrc_applied), None, length=phyics_steps_per_model)  
+        (d, _, _, _), _ = jax.lax.scan(__step, (envs.mjx_data, mjx_model, action, xfrc_applied), None, length=phyics_steps_per_model)  
+
+        force_applied = envs.force_applied * 0
         
-        return ENVS(d, envs.mjx_model, step_num, envs.stiffness, envs.damping, envs.force_applied, envs.key)
+        return ENVS(d, envs.model, step_num, envs.stiffness, envs.damping, force_applied, envs.key)
     
     # From mujoco playground
     @jax.jit
@@ -179,7 +195,7 @@ class Sim:
             
             mjx_data = mjx_data.replace(qpos = qpos, qvel = qvel)
 
-            mjx_model = self.generate_mjx_model(key)
+            model = self.generate_mjx_model(key)
 
             key, subkey = jax.random.split(key)
             stiffness = self.cfg.stiffness * (1 + jax.random.normal(subkey,  self.cfg.stiffness.shape) * self.cfg.std_stiffness)
@@ -189,12 +205,11 @@ class Sim:
             damping = self.cfg.damping * (1 + jax.random.normal(subkey,  self.cfg.damping.shape) * self.cfg.std_damping)
             damping = jnp.clip(damping, a_min=0.0)
             
-            key, subkey = jax.random.split(key)
-            force_applied = jax.random.normal(subkey,  mjx_data.xfrc_applied[self.body_id][3:].shape) * self.cfg.std_force
+            force_applied = jnp.zeros(mjx_data.xfrc_applied[self.body_id][3:5].shape)
 
             step_num = 0
 
-            return ENVS(mjx_data, mjx_model, step_num, stiffness, damping, force_applied, subkey)
+            return ENVS(mjx_data, model, step_num, stiffness, damping, force_applied, subkey)
 
         return _reset(keys)
     
@@ -205,7 +220,7 @@ class Sim:
         @jax.vmap
         def _reset(env: ENVS, done):
             d = env.mjx_data
-            m = env.mjx_model
+            m = env.model
 
             mask = (done > 0)
 
@@ -235,7 +250,12 @@ class Sim:
             damping = jnp.clip(damping, a_min=0.0)
 
             key, subkey = jax.random.split(key)
-            force_applied = jnp.where(mask, jax.random.normal(subkey,  d.xfrc_applied[self.body_id][3:].shape) * self.cfg.std_force, env.force_applied)
+            force_activate = jax.random.bernoulli(key, .03)
+            key, subkey = jax.random.split(key)
+            force_applied = jax.random.normal(subkey,  d.xfrc_applied[self.body_id][3:5].shape) * self.cfg.std_force
+            force_applied = jnp.where(force_applied > 0,
+                    jnp.maximum(force_applied, self.cfg.std_force / 2),
+                    jnp.minimum(force_applied, -self.cfg.std_force / 2))  * force_activate
 
             step_num = jnp.where(done > 0, 0, env.step_num)
 
@@ -249,7 +269,10 @@ class Sim:
         keys = jax.random.split(key, int(self.cfg.batch))
 
         @partial(jax.vmap, in_axes=(0, 0), out_axes=(0))
-        def _get_obs(d, key):
+        def _get_obs(env: ENVS, key):
+            d = env.mjx_data
+            step_num = env.step_num
+
             body_pos = d.qpos[:3]
             quat = d.qpos[3:7]
             body_vel = d.qvel[:3]
@@ -291,8 +314,17 @@ class Sim:
             noise_lin_accel = self.cfg.std_acc * jax.random.normal(subkey, base_lin_accel.shape)
             base_lin_accel = base_lin_accel + noise_lin_accel
 
+            gait_frequency = 2
+
+            time_in_seconds = step_num * (1 / self.cfg.model_freq)
+            gait_phase = 2 * jnp.pi * gait_frequency * time_in_seconds
+            obs_gait = jnp.array([
+                jnp.cos(gait_phase),
+                jnp.sin(gait_phase)
+            ])
+
             obs = jnp.concatenate([
-                prev_ctrl, joint_pos, joint_vel, base_ang_vel, base_lin_accel, quat, 
+                prev_ctrl, joint_pos, joint_vel, base_ang_vel, base_lin_accel, quat, obs_gait,
                 body_pos, body_vel,
                 right_foot_pos, left_foot_pos,
                 right_foot_vel, left_foot_vel,
@@ -304,7 +336,7 @@ class Sim:
             
             return obs
         
-        return _get_obs(envs.mjx_data, keys)
+        return _get_obs(envs, keys)
 
 
     def tree_flatten(self):

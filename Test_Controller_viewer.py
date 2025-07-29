@@ -2,7 +2,7 @@
 Run a trained PPO policy in MuJoCo viewer at 60 FPS.
 """
 
-import time, re, threading
+import re, threading
 from pathlib import Path
 from Models.Policy import Policy
 import mujoco
@@ -79,7 +79,6 @@ mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
 
 mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
 
-episode_start = time.time()
 DT_CONTROL = 1.0 / cfg["PPO"]["model_freq"]
 
 

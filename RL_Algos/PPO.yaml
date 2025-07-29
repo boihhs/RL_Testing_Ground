@@ -6,23 +6,23 @@ PPO:
   e_clip: 0.4
   
   learning_rate_value: 1e-3
-  learning_rate_policy: 1e-4
+  learning_rate_policy: 1e-3
   weight_decay: 1e-2
 
-  batch_size: 512
+  batch_size: 1500
   bound_coef: 1
-  entropy_coef:  -.01
+  entropy_coef:  -.1
   
   mini_batch_loops: 20
-  num_epocs: 100
+  num_epocs: 500
   max_timesteps: 1500
   horizon_length: 25
 
   xml_path: "./Robot_Models/booster_t1/scene.xml"
   model_freq: 50
 
-  policy_model_shape: [117, 256, 256, 128, 128, 46] # action_dim * 2
-  value_model_shape: [117, 256, 256, 256, 128, 1]
+  policy_model_shape: [82, 256, 256, 128, 128, 46] # action_dim * 2
+  value_model_shape: [119, 256, 256, 256, 128, 1]
  
   action_bias: [0.00,  0.435, -1.045, -0.085,  0.00, -1.220,
     -1.045,  0.085,  0.00,  1.220,  0.00,
@@ -43,9 +43,9 @@ PPO:
       1.57, 1.57, 1, 2.34, 0.35, 0.44,
       1.57, 0.2, 1, 2.34, 0.35, 0.44]
 
-  policy_state_dim: 117
-  value_state_dim: 117
-  total_obs_dim: 117
+  policy_state_dim: 82
+  value_state_dim: 119
+  total_obs_dim: 119
   
   action_dim: 23
 
@@ -103,40 +103,40 @@ PPO:
   ]
 
 STD:
-  # std_gyro: .01
-  # std_acc: .2
-  # std_joint_pos: .005
-  # std_joint_vel: .05
+  std_gyro: .01
+  std_acc: .02
+  std_joint_pos: .005
+  std_joint_vel: .05
 
-  # std_body_mass: .1
-  # std_body_inertia: .1
-  # std_body_ipos: .02
-  # std_geom_friction: .1
-  # std_dof_armature: .025
-  # std_dof_frictionloss: .1
-  # std_stiffness: .1
-  # std_damping: .1
+  std_body_mass: .1
+  std_body_inertia: .1
+  std_body_ipos: .02
+  std_geom_friction: .1
+  std_dof_armature: .025
+  std_dof_frictionloss: .1
+  std_stiffness: .1
+  std_damping: .1
 
-  # std_qpos: .01
-  # std_qvel: .05
+  std_qpos: .01
+  std_qvel: .05
 
-  std_gyro: .0
-  std_acc: .0
-  std_joint_pos: .00
-  std_joint_vel: .0
+  # std_gyro: .0
+  # std_acc: .0
+  # std_joint_pos: .00
+  # std_joint_vel: .0
 
-  std_body_mass: .0
-  std_body_inertia: .0
-  std_body_ipos: .0
-  std_geom_friction: .0
-  std_dof_armature: .0
-  std_dof_frictionloss: .0
-  std_stiffness: .0
-  std_damping: .0
+  # std_body_mass: .0
+  # std_body_inertia: .0
+  # std_body_ipos: .0
+  # std_geom_friction: .0
+  # std_dof_armature: .0
+  # std_dof_frictionloss: .0
+  # std_stiffness: .0
+  # std_damping: .0
 
-  std_qpos: .0
-  std_qvel: .2
-  std_force: 20
+  # std_qpos: .0
+  # std_qvel: .0
+  std_force: 10
 
 Rewards:
   alive:          0.5      # ↓   standing starts at only +0.5

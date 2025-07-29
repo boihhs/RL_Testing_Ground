@@ -1,7 +1,7 @@
 <mujoco model="T1">
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
 
-  <option integrator="implicitfast"/>
+  <option integrator="implicitfast" timestep=".001"/>
 
   <asset>
     <material name="light_gray" rgba="0.76 0.76 0.76 1"/>
