@@ -11,7 +11,7 @@ PPO:
 
   batch_size: 1500
   bound_coef: 1
-  entropy_coef:  -.1
+  entropy_coef:  -.3
   
   mini_batch_loops: 20
   num_epocs: 500
@@ -21,8 +21,8 @@ PPO:
   xml_path: "./Robot_Models/booster_t1/scene.xml"
   model_freq: 50
 
-  policy_model_shape: [82, 256, 256, 128, 128, 46] # action_dim * 2
-  value_model_shape: [119, 256, 256, 256, 128, 1]
+  policy_model_shape: [122, 256, 256, 128, 128, 46] # action_dim * 2
+  value_model_shape: [122, 256, 256, 256, 128, 1]
  
   action_bias: [0.00,  0.435, -1.045, -0.085,  0.00, -1.220,
     -1.045,  0.085,  0.00,  1.220,  0.00,
@@ -43,9 +43,9 @@ PPO:
       1.57, 1.57, 1, 2.34, 0.35, 0.44,
       1.57, 0.2, 1, 2.34, 0.35, 0.44]
 
-  policy_state_dim: 82
-  value_state_dim: 119
-  total_obs_dim: 119
+  policy_state_dim: 122
+  value_state_dim: 122
+  total_obs_dim: 122
   
   action_dim: 23
 
@@ -136,7 +136,8 @@ STD:
 
   # std_qpos: .0
   # std_qvel: .0
-  std_force: 10
+  std_force: 50
+  std_goal_velocity: .5
 
 Rewards:
   alive:          0.5      # ↓   standing starts at only +0.5
