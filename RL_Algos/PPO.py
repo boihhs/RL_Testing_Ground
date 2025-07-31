@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from jax import debug
 import numpy as np
 
-# np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+np.set_printoptions(threshold=np.inf, linewidth=np.inf)
 
 @jax.tree_util.register_dataclass
 @dataclass
@@ -44,26 +44,16 @@ class PPO:
         
         self.buffer = ReplayBuffer(self.cfg["PPO"]["horizon_length"] * (self.cfg["PPO"]["batch_size"]), self.cfg["PPO"]["value_state_dim"], self.cfg["PPO"]["action_dim"], self.cfg["PPO"]["mini_batch_size"])
 
-        transition_steps = int((self.cfg["PPO"]["mini_batch_loops"] * self.cfg["PPO"]["num_epocs"]) // 10)
-
-        lr_schedule_policy = optax.exponential_decay(
-            init_value=float(self.cfg["PPO"]["learning_rate_policy"]),
-            transition_steps=transition_steps,
-            decay_rate=0.99,
-            staircase=True
-        )
-        lr_schedule_value = optax.exponential_decay(
-            init_value=float(self.cfg["PPO"]["learning_rate_value"]),
-            transition_steps=transition_steps,
-            decay_rate=0.99,
-            staircase=True
-        )
+        learning_rate = float(self.cfg["PPO"]["learning_rate_policy"])
+        
+        # lr_schedule_value = optax.constant_schedule(
+        #     init_value=float(self.cfg["PPO"]["learning_rate_value"])
+        # )    
 
         policy_opt = optax.chain(
             optax.clip_by_global_norm(0.5),
-            optax.adamw(
-                learning_rate=lr_schedule_policy,
-                weight_decay=float(self.cfg["PPO"]["weight_decay"])
+            optax.inject_hyperparams(optax.adam)(
+                learning_rate=learning_rate,
             )
         )
         policy_opt_state = policy_opt.init(policy)
@@ -71,9 +61,8 @@ class PPO:
 
         value_1_opt = optax.chain(
             optax.clip_by_global_norm(0.5),
-            optax.adamw(
-                learning_rate=lr_schedule_value,
-                weight_decay=float(self.cfg["PPO"]["weight_decay"])
+            optax.inject_hyperparams(optax.adam)(
+                learning_rate=learning_rate,
             )
         )
         value_1_opt_state = value_1_opt.init(value_1)
@@ -81,7 +70,7 @@ class PPO:
 
         
     @jax.jit
-    def loss(self, buffer, value_1, policy, old_log_probs):
+    def loss(self, buffer, value_1, policy, old_log_probs, old_means, old_log_std):
         states, actions, rewards, next_states, dones = buffer.states, buffer.actions, buffer.rewards, buffer.next_states, buffer.dones
 
         values = value_1(states)
@@ -133,18 +122,25 @@ class PPO:
         entropy_loss = jnp.mean(.5 * jnp.log(2*jnp.pi*jnp.exp(1)) + log_std)
 
         loss = loss_value + policy_loss + float(self.cfg["PPO"]["bound_coef"]) * bound_loss + float(self.cfg["PPO"]["entropy_coef"]) * entropy_loss
-        # jax.debug.print("dones {}", dones)
-        # jax.debug.print("states {}", states[:, 77])
-        # jax.debug.print("surrogate {}", surrogate_clipped.transpose())
+
+        std     = jnp.exp(log_std)
+        old_std = jnp.exp(old_log_std)
+        kl = jnp.sum( log_std - old_log_std + 0.5 * ((old_std**2 + (means - old_means)**2) / (std**2)) - 0.5, axis=-1)
+        kl_mean = jnp.mean(kl)
+        kl_mean = jax.lax.stop_gradient(kl_mean)
+
+        jax.debug.print("dones {}", jnp.mean(dones))
+        # jax.debug.print("KL divergence {}", kl_mean)
+        # jax.debug.print("surrogate {}", surrogate.shape)
         jax.debug.print("mean mean {}", jnp.mean(jnp.abs(means)))
         jax.debug.print("std mean? {}", jnp.mean(jnp.exp(log_std)))
-        jax.debug.print("loss_value mean? {}", jnp.mean(loss_value))
-        jax.debug.print("policy_loss mean? {}", jnp.mean(policy_loss))
-        jax.debug.print("bound_loss mean? {}", jnp.mean(bound_loss))
-        jax.debug.print("entropy_loss mean? {}", jnp.mean(entropy_loss))
+        # jax.debug.print("loss_value mean? {}", jnp.mean(loss_value))
+        # jax.debug.print("policy_loss mean? {}", jnp.mean(policy_loss))
+        # jax.debug.print("bound_loss mean? {}", jnp.mean(bound_loss))
+        # jax.debug.print("entropy_loss mean? {}", jnp.mean(entropy_loss))
         jax.debug.print("value mean {}", jnp.mean(values))
         
-        return loss
+        return loss, kl_mean
         
 
     def run(self):
@@ -186,13 +182,30 @@ class PPO:
 
         @jax.jit
         def _loop_minibatch(context, xs):
-            value_1_container, policy_container, buffer, old_log_probs = context
+            value_1_container, policy_container, buffer, old_log_probs, old_means, old_log_std = context
             value_1, policy = value_1_container.model, policy_container.model
             value_1_opt, policy_opt = value_1_container.opt, policy_container.opt
             value_1_opt_state, policy_opt_state = value_1_container.opt_state, policy_container.opt_state
 
-            loss, (grads_value_1, grads_policy) = jax.value_and_grad(self.loss, argnums=(1,2)) (buffer, value_1, policy, old_log_probs)
+            (loss, kl_mean), (grads_value_1, grads_policy) = jax.value_and_grad(self.loss, argnums=(1,2), has_aux=True) (buffer, value_1, policy, old_log_probs, old_means, old_log_std)
             
+            clip_state_value, inject_state_value = value_1_opt_state
+            clip_state_policy, inject_state_policy = policy_opt_state
+
+            learning_rate = inject_state_value.hyperparams['learning_rate']
+            # learning_rate = jnp.where(kl_mean > self.cfg["PPO"]["desired_kl"] * 2,
+            #                           jnp.maximum(1e-5, learning_rate / 2),
+            #                           jnp.where(kl_mean < self.cfg["PPO"]["desired_kl"] / 2, jnp.minimum(1e-2, learning_rate * 1.5), learning_rate))
+            
+            # new_hparams_value  = {**inject_state_value.hyperparams,  'learning_rate': learning_rate}
+            # new_hparams_policy  = {**inject_state_policy.hyperparams, 'learning_rate': learning_rate}
+
+            # inject_state_value  = inject_state_value._replace(hyperparams=new_hparams_value)
+            # inject_state_policy = inject_state_policy._replace(hyperparams=new_hparams_policy)
+
+            # value_1_opt_state = (clip_state_value, inject_state_value)
+            # policy_opt_state = (clip_state_policy, inject_state_policy)
+
             updates_value_1, value_1_opt_state = value_1_opt.update(grads_value_1, value_1_opt_state, value_1)
             value_1 = optax.apply_updates(value_1, updates_value_1)
             value_1_container = ModelContainer(value_1, value_1_opt, value_1_opt_state)
@@ -202,7 +215,8 @@ class PPO:
             policy = optax.apply_updates(policy, updates_policy)
             policy_container = ModelContainer(policy, policy_opt, policy_opt_state)
 
-            return (value_1_container, policy_container, buffer, old_log_probs), (loss)
+            jax.debug.print("learning rate: {}", learning_rate)
+            return (value_1_container, policy_container, buffer, old_log_probs, old_means, old_log_std), (loss)
         
         for i in range(self.cfg["PPO"]["num_epocs"]):
             policy = self.policy_container.model
@@ -212,12 +226,15 @@ class PPO:
             (envs, self.buffer, _, key), _ = jax.lax.scan(_rollout, (envs, self.buffer, policy, subkey), None, length = int(self.cfg["PPO"]["horizon_length"]))
             
             policy_obs = self.buffer.states[:, :self.cfg["PPO"]["policy_state_dim"]]
-            old_log_probs, _, _ = policy.get_log_prob(policy_obs, self.buffer.actions)
-            old_log_probs = jax.tree_util.tree_map(jax.lax.stop_gradient, old_log_probs)
+            old_log_probs, old_means, old_log_std = policy.get_log_prob(policy_obs, self.buffer.actions)
+            old_log_probs = jax.lax.stop_gradient(old_log_probs)
+            old_means     = jax.lax.stop_gradient(old_means)
+            old_log_std   = jax.lax.stop_gradient(old_log_std)
 
-            (self.value_1_container, self.policy_container, self.buffer, _), (loss) = jax.lax.scan(_loop_minibatch, (self.value_1_container, self.policy_container, self.buffer, old_log_probs), None, length = int(self.cfg["PPO"]["mini_batch_loops"]))
+            (self.value_1_container, self.policy_container, self.buffer, _, _, _), (loss) = jax.lax.scan(_loop_minibatch, (self.value_1_container, self.policy_container, self.buffer, old_log_probs, old_means, old_log_std), None, length = int(self.cfg["PPO"]["mini_batch_loops"]))
 
             print("Rewards Batch Average:", jnp.mean(self.buffer.rewards), "loss Average:", jnp.mean(loss))
+           
             avg_buffer_rewards.append(jnp.mean(self.buffer.rewards))
             avg_loss.append(jnp.mean(loss))
 

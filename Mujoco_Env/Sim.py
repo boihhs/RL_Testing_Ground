@@ -25,6 +25,7 @@ class MODEL:
     dof_frictionloss: jax.Array 
     dof_armature: jax.Array 
 
+ 
 @jax.tree_util.register_dataclass
 @dataclass
 class ENVS:
@@ -74,11 +75,11 @@ class Sim:
         geom_friction = jnp.clip(geom_friction, a_min=0.0, a_max=1.0)
 
         key, subkey = jax.random.split(key)
-        dof_frictionloss = mjx_model.dof_frictionloss + (1. + jax.random.normal(subkey,  mjx_model.dof_frictionloss.shape) * self.cfg["STD"]["std_dof_frictionloss"])
+        dof_frictionloss = mjx_model.dof_frictionloss * (1. + jax.random.normal(subkey,  mjx_model.dof_frictionloss.shape) * self.cfg["STD"]["std_dof_frictionloss"])
         dof_frictionloss = jnp.clip(dof_frictionloss, a_min=0.0)
 
         key, subkey = jax.random.split(key)
-        dof_armature = mjx_model.dof_armature + (1. + jax.random.normal(subkey,  mjx_model.dof_armature.shape) * self.cfg["STD"]["std_dof_armature"])
+        dof_armature = mjx_model.dof_armature * (1. + jax.random.normal(subkey,  mjx_model.dof_armature.shape) * self.cfg["STD"]["std_dof_armature"])
         dof_armature = jnp.clip(dof_armature, a_min=0.0)
 
         model = MODEL(body_mass, body_inertia, body_ipos, geom_friction, dof_frictionloss, dof_armature)
@@ -155,7 +156,7 @@ class Sim:
             mjx_data = mjx_data.replace(qpos = qpos, qvel = qvel)
 
             key, subkey = jax.random.split(key)
-            model = self.generate_mjx_model(key)
+            model = self.generate_mjx_model(subkey)
 
             key, subkey = jax.random.split(key)
             stiffness = jnp.array(self.cfg["PPO"]["stiffness"]) * (1 + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["stiffness"]).shape) * self.cfg["STD"]["std_stiffness"])
@@ -201,9 +202,10 @@ class Sim:
                 qvel=jnp.where(mask, qvel, d.qvel),
             )   
 
+            key, subkey = jax.random.split(key)
             m = jax.lax.cond(
                 mask,
-                lambda _: self.generate_mjx_model(key),
+                lambda _: self.generate_mjx_model(subkey),
                 lambda _: m,
                 operand=None,
             )
@@ -248,7 +250,6 @@ class Sim:
             return obs, reward, done
         
         return _get_obs_and_reward(envs, keys)
-
 
     def tree_flatten(self):
         return (), (self.cfg, self.mj_model, self.mjx_model, self.timestep, self.body_id)

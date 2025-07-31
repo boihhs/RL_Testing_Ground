@@ -5,7 +5,7 @@ Run a trained PPO policy in MuJoCo viewer at 60 FPS.
 import time, re, threading
 from pathlib import Path
 from Models.Policy import Policy
-from Mujoco_Env.Sim import ENVS, Sim
+from Mujoco_Env.Sim import ENVS, Sim, MODEL
 from Robot_Models.booster_t1.booster import get_obs_and_reward_walking
 import mujoco
 from mujoco import viewer
@@ -73,6 +73,7 @@ keyboard.Listener(on_press=on_press, on_release=on_release).start()
 kf_id  = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_KEY, "home")
 
 mj_data = mujoco.MjData(mj_model)
+print(mj_model.body_mass)
 mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
 
 mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
@@ -80,34 +81,21 @@ mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
 episode_start = time.time()
 DT_CONTROL = 1.0 / cfg["PPO"]["model_freq"]
 
-ang_vel_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, "angular-velocity")
-ang_vel_sensor_start, ang_vel_sensor_length = mj_model.sensor_adr[ang_vel_id], mj_model.sensor_dim[ang_vel_id]
-
-lin_accel_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, "linear-acceleration")
-lin_accel_sensor_start, lin_accel_sensor_length = mj_model.sensor_adr[lin_accel_id], mj_model.sensor_dim[lin_accel_id]
-
-right_foot_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "right_foot_link")
-left_foot_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "left_foot_link")
-
-body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "Trunk")
-
-right_foot_geom_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, "right_foot_geom")
-left_foot_geom_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, "left_foot_geom")
-ground_geom_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-
-
 mjx_data = mjx.put_data(mj_model, mj_data)
 curr_action = jnp.array(cfg["PPO"]["default_qpos"])
 prev_action = jnp.array(cfg["PPO"]["default_qpos"])
 step_num = 0
 
-env = ENVS(mjx_data, None, curr_action, prev_action, step_num, None, None, None, None)
+goal_velicy = jnp.array([0, -.3, 0])
+
+model = MODEL(jnp.array(mj_model.body_mass), None, None, None, None, None)
+push_force = jnp.array([0, 0])
+
+env = ENVS(mjx_data, model, curr_action, prev_action, step_num, None, None, push_force, goal_velicy, None)
 sim = Sim(cfg)
 
 prev_action = jnp.array(cfg["PPO"]["default_qpos"])
-
-
-
+rewards = []
 i = 0
 with viewer.launch_passive(mj_model, mj_data) as v:
     while v.is_running():
@@ -117,27 +105,20 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         
         key, subkey = jax.random.split(key)
         obs, reward, done = get_obs_and_reward_walking(env, sim, subkey)
+        
 
         policy_obs = obs[:cfg["PPO"]["policy_state_dim"]]
-
+       
         actions= policy.get_raw_action(policy_obs[None, :])
         
         # key, subkey = jax.random.split(key)
         # actions= policy.get_action(policy_obs[None, :], subkey)
 
         action = actions[0]
-
-        key, subkey = jax.random.split(key)
-        force_activate = jax.random.bernoulli(key, .03) 
-        key, subkey = jax.random.split(key)
-        force = jax.random.normal(subkey,  d.xfrc_applied[body_id][3:5].shape) * cfg["STD"]["std_force"]
-        force = jnp.where(force > 0,
-                  jnp.maximum(force, cfg["STD"]["std_force"] / 2),
-                  jnp.minimum(force, -cfg["STD"]["std_force"] / 2))  * force_activate
-        xfrc_applied = jnp.zeros(d.xfrc_applied[body_id].shape).at[3:5].set(force)
     
-        print(reward)
-        print(done)
+        # print(reward)
+        # print(done)
+        rewards.append(reward)
     
         # print(data.xfrc_applied[body_id][3:])
         i = i + 1
@@ -154,14 +135,13 @@ with viewer.launch_passive(mj_model, mj_data) as v:
             # print(ctrl)
             ctrl = ctrl.clip(-jnp.array(cfg["PPO"]["torque_limit"]), jnp.array(cfg["PPO"]["torque_limit"]))
             mj_data.ctrl[:] = np.asarray(ctrl, dtype=np.float64) 
-            mj_data.xfrc_applied[body_id] = xfrc_applied
 
             mujoco.mj_step(mj_model, mj_data)
 
         # render frame
         v.sync()
 
-        prev_action = action
+        
 
         # real‑time pacing
         sleep_t = DT_CONTROL - (time.time() - frame_start)
@@ -169,12 +149,17 @@ with viewer.launch_passive(mj_model, mj_data) as v:
             time.sleep(sleep_t)
 
         # auto‑reset
-        # if (done):
-        #     mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
-        #     episode_start = time.time()
-        #     i = 0
-
-        mjx_data = mjx.put_data(mj_model, mj_data)
-        env = ENVS(mjx_data, None, action, curr_action, env.step_num + 1, None, None, None, None)
+        if (done):
+            mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
+            episode_start = time.time()
+            print("hello")
+            print(np.mean(np.array(rewards)))
+            rewards = []
+            i = 0
+            mjx_data = mjx.put_data(mj_model, mj_data)
+            env = ENVS(mjx_data, env.model, jnp.array(cfg["PPO"]["default_qpos"]), jnp.array(cfg["PPO"]["default_qpos"]), 0, None, None, env.force_applied, env.goal_velocity, None)
+        else:
+            mjx_data = mjx.put_data(mj_model, mj_data)
+            env = ENVS(mjx_data, env.model, action, env.curr_action, env.step_num + 1, None, None, env.force_applied, env.goal_velocity, None)
 
             

@@ -76,18 +76,18 @@ mj_data = mujoco.MjData(mj_model)
 print(mj_model.body_mass)
 mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
 
-mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
+action = jnp.array(cfg["PPO"]["default_qpos"])
+prev_action = jnp.array(cfg["PPO"]["default_qpos"])
+
 
 episode_start = time.time()
-DT_CONTROL = 1.0 / cfg["PPO"]["model_freq"]
+DT_CONTROL     = 1.0 / cfg["PPO"]["model_freq"]
 
-mjx_data = mjx.put_data(mj_model, mj_data)
-curr_action = jnp.array(cfg["PPO"]["default_qpos"])
-prev_action = jnp.array(cfg["PPO"]["default_qpos"])
-step_num = 0
 
-goal_velocity = jnp.array([0, -1, 0])
-push_force = jnp.array([0, 0])
+# --- bookkeeping -------------------------------------------------------------
+rewards  = []
+i        = 0
+N_PHYS   = int(1.0 / cfg["PPO"]["model_freq"] / mj_model.opt.timestep)
 
 def _quat_to_small_euler(q):
     qw, qx, qy, qz = q[0], q[1], q[2], q[3]
@@ -105,7 +105,7 @@ def _rotate_vector_inverse_rpy(roll, pitch, yaw, vector):
 def get_collision(d, geom1: int, geom2: int):
     contact = d.contact
     if contact.geom.shape[0] == 0:
-            return 0
+        return 0
     mask = (jnp.array([geom1, geom2]) == contact.geom).all(axis=1)
     mask |= (jnp.array([geom2, geom1]) == contact.geom).all(axis=1)
     idx = jnp.where(mask, contact.dist, 1e4).argmin()
@@ -113,19 +113,24 @@ def get_collision(d, geom1: int, geom2: int):
     # normal = (dist < 0) * contact.frame[idx, 0, :3]
     return dist < 0
 
+step_num = 0
 
-rewards = []
-i = 0
+# --- viewer loop -------------------------------------------------------------
 with viewer.launch_passive(mj_model, mj_data) as v:
     while v.is_running():
         frame_start = time.time()
 
-        d = mj_data
-        
+        # 1. observation ------------------------------------------------------
+        key, subkey = jax.random.split(key)
+    
         # Get obs things
+        d = mj_data
+        current_action = action
+        prev_action = prev_action
         # (vx, vy, w_yaw)
- 
-        body_mass = 66
+        goal_velocity = jnp.array([0, 0, 0.])
+        push_force =  jnp.array([0., 0.])
+        body_mass = jnp.sum(jnp.array(mj_model.body_mass))
 
         ang_vel_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, "angular-velocity")
         ang_vel_sensor = Sensor(ang_vel_id, mj_model.sensor_adr[ang_vel_id], mj_model.sensor_dim[ang_vel_id])
@@ -172,6 +177,22 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         current_torque = d.ctrl[:]
         body_com = d.subtree_com[body_id]
 
+        key, subkey = jax.random.split(key)
+        noise_joint_pos = cfg["STD"]["std_joint_pos"] * jax.random.normal(subkey, joint_pos.shape)
+        joint_pos = joint_pos + noise_joint_pos
+
+        key, subkey = jax.random.split(key)
+        noise_joint_vel = cfg["STD"]["std_joint_vel"] * jax.random.normal(subkey, joint_vel.shape)
+        joint_vel = joint_vel + noise_joint_vel
+
+        key, subkey = jax.random.split(key)
+        noise_ang_vel = cfg["STD"]["std_gyro"] * jax.random.normal(subkey, base_ang_vel.shape)
+        base_ang_vel = base_ang_vel + noise_ang_vel
+
+        key, subkey = jax.random.split(key)
+        noise_lin_accel = cfg["STD"]["std_acc"] * jax.random.normal(subkey, base_lin_accel.shape)
+        base_lin_accel = base_lin_accel + noise_lin_accel
+
         gravity_direction = jnp.array([.0, .0, -1.])
 
         body_roll, body_pitch, body_yaw = _quat_to_small_euler(body_q)
@@ -213,7 +234,7 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         joint_vel_reward = jnp.linalg.norm(joint_vel)**2 * -1e-4
         joint_accel_reward = jnp.linalg.norm(joint_accel)**2 * -1e-7
         base_accel = (jnp.linalg.norm(base_lin_accel)**2 + jnp.linalg.norm(base_ang_accel)**2) * -1e-4
-        action_rate = jnp.linalg.norm(curr_action - prev_action)**2 * -1
+        action_rate = jnp.linalg.norm(current_action - prev_action)**2 * -1
         joint_pos_limit = jnp.sum(jnp.where(joint_pos > max_q, 1, 0) + jnp.where(joint_pos < min_q, 1, 0)) * -1
         feet_swing = (left_should_swing * (1 - left_foot_ground_contact) + right_should_swing * (1 - right_foot_ground_contact)) * 3
         feet_slip = ((1 - left_should_swing) * jnp.linalg.norm(left_foot_vel[:2])**2 + (1 - right_should_swing) * jnp.linalg.norm(right_foot_vel[:2])**2) * -.1
@@ -226,10 +247,10 @@ with viewer.launch_passive(mj_model, mj_data) as v:
                 torque + torque_tiredness + power + lin_vel + ang_vel_xy + joint_vel_reward + joint_accel_reward +
                 base_accel + action_rate + joint_pos_limit + feet_swing + feet_slip + feet_yaw + feet_roll+ 
                 feet_distance)
-        
+                
         reward = jnp.maximum(reward, -1)
-        
-        fallen = (body_pos[2] < .45)
+            
+        fallen = (body_pos[2] < .45) | (body_roll > jnp.rad2deg(20)) | (body_pitch > jnp.rad2deg(20))
 
         done = (fallen) | (step_num > cfg["PPO"]["max_timesteps"])
 
@@ -237,64 +258,42 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         obs = jnp.concatenate([goal_velocity, obs_gait, projected_gravity, base_ang_vel, joint_pos, joint_vel, prev_action,
             jnp.array((body_mass,)), body_com, body_vel, jnp.array((body_pos[2],)), push_force], axis=-1)
         
+        prev_action = action
+        policy_obs        = obs[:cfg["PPO"]["policy_state_dim"]]
+        action            = policy.get_raw_action(policy_obs[None, :])[0]
 
-        policy_obs = obs[:cfg["PPO"]["policy_state_dim"]]
-       
-        actions= policy.get_raw_action(policy_obs[None, :])
-        
-        # key, subkey = jax.random.split(key)
-        # actions= policy.get_action(policy_obs[None, :], subkey)
-
-        action = actions[0]
-
-        prev_action = curr_action
-        curr_action = action
-        
-        step_num += 1
-    
-        # print(reward)
-        # print(done)
+        print(reward)
         rewards.append(reward)
-    
-        # print(data.xfrc_applied[body_id][3:])
-        i = i + 1
-        # print(action)
-        # 3. physics stepping until next control tick
-        sim_t0 = mj_data.time
-        while (mj_data.time - sim_t0) < DT_CONTROL:
+        step_num += 1
 
+        # 2. manual PD sub-steps ---------------------------------------------
+        for _ in range(N_PHYS):
             joint_pos = mj_data.qpos[7:]
             joint_vel = mj_data.qvel[6:]
-            ctrl = jnp.array(cfg["PPO"]["stiffness"]) * (action - joint_pos) - jnp.array(cfg["PPO"]["damping"]) * (joint_vel)
-
-            # ctrl = jnp.array(cfg["PPO"]["stiffness"]) * (jnp.array(cfg["PPO"]["default_qpos"]) - joint_pos) - jnp.array(cfg["PPO"]["damping"]) * (joint_vel)
-            # print(ctrl)
-            ctrl = ctrl.clip(-jnp.array(cfg["PPO"]["torque_limit"]), jnp.array(cfg["PPO"]["torque_limit"]))
-            mj_data.ctrl[:] = np.asarray(ctrl, dtype=np.float64) 
-
+            ctrl = jnp.array(cfg["PPO"]["stiffness"]) * (action - joint_pos) - jnp.array(cfg["PPO"]["damping"]) * joint_vel
+            ctrl = ctrl.clip(-jnp.array(cfg["PPO"]["torque_limit"]),
+                              jnp.array(cfg["PPO"]["torque_limit"]))
+            mj_data.ctrl[:] = np.asarray(ctrl, dtype=np.float64)
             mujoco.mj_step(mj_model, mj_data)
 
-        # render frame
+       
+        # 4. render -----------------------------------------------------------
         v.sync()
 
-        
+        # 5. real-time pacing -------------------------------------------------
+        # sleep_t = DT_CONTROL - (time.time() - frame_start)
+        # if sleep_t > 0:
+        #     time.sleep(sleep_t)
 
-        # real‑time pacing
-        sleep_t = DT_CONTROL - (time.time() - frame_start)
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-
-        # auto‑reset
-        if (done):
+        # 6. auto-reset -------------------------------------------------------
+        if done:
             mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
             episode_start = time.time()
             print("hello")
             print(np.mean(np.array(rewards)))
             rewards = []
             step_num = 0
-            curr_action = jnp.array(cfg["PPO"]["default_qpos"])
+            action = jnp.array(cfg["PPO"]["default_qpos"])
             prev_action = jnp.array(cfg["PPO"]["default_qpos"])
 
-        
 
-            
