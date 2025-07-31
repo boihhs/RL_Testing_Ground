@@ -118,7 +118,7 @@ def get_obs_and_reward_walking(env, sim, key):
     projected_gravity = _rotate_vector_inverse_rpy(body_roll, body_pitch, body_yaw, gravity_direction)
 
     gait_freq = 1.5
-    h_des = 0.68
+    h_des = 0.65
     tau_limit = jnp.array(sim.cfg["PPO"]["torque_limit"])
     max_q = jnp.array(sim.cfg["PPO"]["joint_q_max"])
     min_q = jnp.array(sim.cfg["PPO"]["joint_q_min"])
@@ -167,7 +167,7 @@ def get_obs_and_reward_walking(env, sim, key):
     
     reward = jnp.maximum(reward, 0)
             
-    fallen = (body_pos[2] < .45) | (body_roll > jnp.rad2deg(20)) | (body_pitch > jnp.rad2deg(20))
+    fallen = (body_pos[2] < .45) | (body_roll > jnp.deg2rad(10)) | (body_pitch > jnp.deg2rad(10))
 
     done = (fallen) | (step_num > sim.cfg["PPO"]["max_timesteps"])
 

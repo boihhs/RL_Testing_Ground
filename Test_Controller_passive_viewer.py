@@ -86,7 +86,7 @@ curr_action = jnp.array(cfg["PPO"]["default_qpos"])
 prev_action = jnp.array(cfg["PPO"]["default_qpos"])
 step_num = 0
 
-goal_velicy = jnp.array([0, -.3, 0])
+goal_velicy = jnp.array([-5, 0, 0])
 
 model = MODEL(jnp.array(mj_model.body_mass), None, None, None, None, None)
 push_force = jnp.array([0, 0])
@@ -96,6 +96,7 @@ sim = Sim(cfg)
 
 prev_action = jnp.array(cfg["PPO"]["default_qpos"])
 rewards = []
+
 i = 0
 with viewer.launch_passive(mj_model, mj_data) as v:
     while v.is_running():
@@ -141,7 +142,11 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         # render frame
         v.sync()
 
-        
+        if i % 100 == 0:
+            if goal_velicy[0] == -5:
+                goal_velicy = goal_velicy.at[0].set(5)
+            else:
+                goal_velicy = goal_velicy.at[0].set(-5)
 
         # real‑time pacing
         sleep_t = DT_CONTROL - (time.time() - frame_start)
@@ -160,6 +165,6 @@ with viewer.launch_passive(mj_model, mj_data) as v:
             env = ENVS(mjx_data, env.model, jnp.array(cfg["PPO"]["default_qpos"]), jnp.array(cfg["PPO"]["default_qpos"]), 0, None, None, env.force_applied, env.goal_velocity, None)
         else:
             mjx_data = mjx.put_data(mj_model, mj_data)
-            env = ENVS(mjx_data, env.model, action, env.curr_action, env.step_num + 1, None, None, env.force_applied, env.goal_velocity, None)
+            env = ENVS(mjx_data, env.model, action, env.curr_action, env.step_num + 1, None, None, env.force_applied, goal_velicy, None)
 
             

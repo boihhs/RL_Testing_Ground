@@ -193,18 +193,18 @@ class PPO:
             clip_state_policy, inject_state_policy = policy_opt_state
 
             learning_rate = inject_state_value.hyperparams['learning_rate']
-            # learning_rate = jnp.where(kl_mean > self.cfg["PPO"]["desired_kl"] * 2,
-            #                           jnp.maximum(1e-5, learning_rate / 2),
-            #                           jnp.where(kl_mean < self.cfg["PPO"]["desired_kl"] / 2, jnp.minimum(1e-2, learning_rate * 1.5), learning_rate))
+            learning_rate = jnp.where(kl_mean > self.cfg["PPO"]["desired_kl"] * 2,
+                                      jnp.maximum(1e-4, learning_rate / 2),
+                                      jnp.where(kl_mean < self.cfg["PPO"]["desired_kl"] / 2, jnp.minimum(1e-2, learning_rate * 1.5), learning_rate))
             
-            # new_hparams_value  = {**inject_state_value.hyperparams,  'learning_rate': learning_rate}
-            # new_hparams_policy  = {**inject_state_policy.hyperparams, 'learning_rate': learning_rate}
+            new_hparams_value  = {**inject_state_value.hyperparams,  'learning_rate': learning_rate}
+            new_hparams_policy  = {**inject_state_policy.hyperparams, 'learning_rate': learning_rate}
 
-            # inject_state_value  = inject_state_value._replace(hyperparams=new_hparams_value)
-            # inject_state_policy = inject_state_policy._replace(hyperparams=new_hparams_policy)
+            inject_state_value  = inject_state_value._replace(hyperparams=new_hparams_value)
+            inject_state_policy = inject_state_policy._replace(hyperparams=new_hparams_policy)
 
-            # value_1_opt_state = (clip_state_value, inject_state_value)
-            # policy_opt_state = (clip_state_policy, inject_state_policy)
+            value_1_opt_state = (clip_state_value, inject_state_value)
+            policy_opt_state = (clip_state_policy, inject_state_policy)
 
             updates_value_1, value_1_opt_state = value_1_opt.update(grads_value_1, value_1_opt_state, value_1)
             value_1 = optax.apply_updates(value_1, updates_value_1)
