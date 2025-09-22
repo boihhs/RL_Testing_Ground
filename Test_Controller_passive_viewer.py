@@ -30,7 +30,7 @@ def print_pytree_structure(pytree, indent=0, path=""):
         print("  " * indent + f"{path[:-1]}")
 
 
-cfg_file = "/home/leo-benaharon/Desktop/RL_Testing_Ground/RL_Algos/PPO.yaml"
+cfg_file = "/home/leo-benaharon/Desktop/HumanPose/RL_Testing_Ground/RL_Algos/PPO.yaml"
 with open(cfg_file, "r", encoding="utf-8") as f:
             cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
 
@@ -71,6 +71,8 @@ keyboard.Listener(on_press=on_press, on_release=on_release).start()
 # ── 5. Actuator IDs, camera, keyframe reset ────────────────────────────────
 
 kf_id  = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_KEY, "home")
+right_hand_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "right_hand_link")
+body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "Trunk")
 
 mj_data = mujoco.MjData(mj_model)
 print(mj_model.body_mass)
@@ -86,12 +88,20 @@ curr_action = jnp.array(cfg["PPO"]["default_qpos"])
 prev_action = jnp.array(cfg["PPO"]["default_qpos"])
 step_num = 0
 
-goal_velicy = jnp.array([-5, 0, 0])
+key, subkey = jax.random.split(key)
+goal_right_hand_pos = jnp.array(cfg["PPO"]["defalt_right_arm_pos"])
+
+goal_left_hand_pos = jnp.zeros((3,))
+goal_left_foot_pos = jnp.zeros((3,))
+goal_right_foot_pos = jnp.zeros((3,))
+goal_body_pos = jnp.zeros((3,))
 
 model = MODEL(jnp.array(mj_model.body_mass), None, None, None, None, None)
 push_force = jnp.array([0, 0])
 
-env = ENVS(mjx_data, model, curr_action, prev_action, step_num, None, None, push_force, goal_velicy, None)
+start_body_pos = mj_data.qpos[:3].copy()
+start_body_ang = mj_data.qpos[3:7].copy()
+env = ENVS(mjx_data, model, curr_action, prev_action, step_num, None, None, push_force, start_body_pos, start_body_ang, None)
 sim = Sim(cfg)
 
 prev_action = jnp.array(cfg["PPO"]["default_qpos"])
@@ -106,7 +116,7 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         
         key, subkey = jax.random.split(key)
         obs, reward, done = get_obs_and_reward_walking(env, sim, subkey)
-        
+        # print(obs[:3])
 
         policy_obs = obs[:cfg["PPO"]["policy_state_dim"]]
        
@@ -117,8 +127,9 @@ with viewer.launch_passive(mj_model, mj_data) as v:
 
         action = actions[0]
     
-        # print(reward)
+        print(reward)
         # print(done)
+        # print(env.start_body_ang)
         rewards.append(reward)
     
         # print(data.xfrc_applied[body_id][3:])
@@ -142,11 +153,9 @@ with viewer.launch_passive(mj_model, mj_data) as v:
         # render frame
         v.sync()
 
-        if i % 100 == 0:
-            if goal_velicy[0] == -5:
-                goal_velicy = goal_velicy.at[0].set(5)
-            else:
-                goal_velicy = goal_velicy.at[0].set(-5)
+        right_hand_pos = d.xpos[right_hand_body_id]
+        body_pos = d.xpos[body_id]
+        
 
         # real‑time pacing
         sleep_t = DT_CONTROL - (time.time() - frame_start)
@@ -162,9 +171,9 @@ with viewer.launch_passive(mj_model, mj_data) as v:
             rewards = []
             i = 0
             mjx_data = mjx.put_data(mj_model, mj_data)
-            env = ENVS(mjx_data, env.model, jnp.array(cfg["PPO"]["default_qpos"]), jnp.array(cfg["PPO"]["default_qpos"]), 0, None, None, env.force_applied, env.goal_velocity, None)
+            env = ENVS(mjx_data, env.model, jnp.array(cfg["PPO"]["default_qpos"]), jnp.array(cfg["PPO"]["default_qpos"]), 0, None, None, env.force_applied, mj_data.qpos[:3].copy(), mj_data.qpos[3:7].copy(), None)
         else:
             mjx_data = mjx.put_data(mj_model, mj_data)
-            env = ENVS(mjx_data, env.model, action, env.curr_action, env.step_num + 1, None, None, env.force_applied, goal_velicy, None)
+            env = ENVS(mjx_data, env.model, action, env.curr_action, env.step_num + 1, None, None, env.force_applied, env.start_body_pos, env.start_body_ang, None)
 
             

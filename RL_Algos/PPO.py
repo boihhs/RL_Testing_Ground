@@ -76,7 +76,7 @@ class PPO:
         values = value_1(states)
         next_values = value_1(next_states)
 
-        deltas = rewards[:, None] + self.cfg["PPO"]["gamma"] * (dones == 0)[:, None] * next_values - values
+        deltas = rewards[:, None] + self.cfg["PPO"]["gamma"] * (dones != 1)[:, None] * next_values - values
         deltas_batch = deltas.reshape((self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["horizon_length"]))
         dones_batch = dones.reshape((self.cfg["PPO"]["batch_size"], self.cfg["PPO"]["horizon_length"]))
 
@@ -88,7 +88,7 @@ class PPO:
             def _calc_adv(context, xs):
                 advantage = context
                 delta, done = xs
-                advantage = delta + self.cfg["PPO"]["gamma"] * self.cfg["PPO"]["lambda"] * (done == 0) * advantage
+                advantage = delta + self.cfg["PPO"]["gamma"] * self.cfg["PPO"]["lambda"] * (done != 1) * advantage
 
                 return advantage, advantage
             

@@ -37,7 +37,8 @@ class ENVS:
     stiffness: jax.Array
     damping: jax.Array
     force_applied: jax.Array
-    goal_velocity: jax.Array
+    start_body_pos: jax.Array
+    start_body_ang: jax.Array
     key: jax.Array 
 
  
@@ -124,7 +125,7 @@ class Sim:
 
         force_applied = envs.force_applied * 0
         
-        return ENVS(d, envs.model, action, envs.curr_action, step_num, envs.stiffness, envs.damping, force_applied, envs.goal_velocity, envs.key)
+        return ENVS(d, envs.model, action, envs.curr_action, step_num, envs.stiffness, envs.damping, force_applied, envs.start_body_pos, envs.start_body_ang, envs.key)
     
     # From mujoco playground
     @jax.jit
@@ -174,9 +175,11 @@ class Sim:
             prev_action = jnp.array(self.cfg["PPO"]["default_qpos"])
 
             key, subkey = jax.random.split(key)
-            goal_velocity = jax.random.normal(subkey,  (3,)) * self.cfg["STD"]["std_goal_velocity"]
+            
+            start_body_pos = qpos[:3]
+            start_body_ang = qpos[3:7]
 
-            return ENVS(mjx_data, model, curr_action, prev_action, step_num, stiffness, damping, force_applied, goal_velocity, key)
+            return ENVS(mjx_data, model, curr_action, prev_action, step_num, stiffness, damping, force_applied, start_body_pos, start_body_ang, key)
 
         return _reset(keys)
     
@@ -190,7 +193,8 @@ class Sim:
             m = env.model
             key = env.key
 
-            mask = (done > 0)
+            mask = (done == 1)
+            reset_anker = (done > 0)
 
             key, subkey = jax.random.split(key)
             qpos = jnp.array(self.cfg["PPO"]["init_pos"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_pos"]).shape) * self.cfg["STD"]["std_joint_pos"]
@@ -231,10 +235,11 @@ class Sim:
             curr_action = jnp.where(mask, jnp.array(self.cfg["PPO"]["default_qpos"]), env.curr_action)
             prev_action = jnp.where(mask, jnp.array(self.cfg["PPO"]["default_qpos"]), env.prev_action)
 
-            key, subkey = jax.random.split(key)
-            goal_velocity = jnp.where(mask, jax.random.normal(subkey,  (3,)) * self.cfg["STD"]["std_goal_velocity"], env.goal_velocity)
+            
+            start_body_pos = jnp.where(reset_anker, d.qpos[:3], env.start_body_pos)
+            start_body_ang = jnp.where(reset_anker, d.qpos[3:7], env.start_body_ang)
 
-            return ENVS(d, m, curr_action, prev_action, step_num, stiffness, damping, force_applied, goal_velocity, key)
+            return ENVS(d, m, curr_action, prev_action, step_num, stiffness, damping, force_applied, start_body_pos, start_body_ang, key)
         
         return _reset(envs, dones)
     
