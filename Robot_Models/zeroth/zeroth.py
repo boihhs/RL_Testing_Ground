@@ -23,21 +23,46 @@ class Sensor:
     length: int     = field(metadata={'static': True})
 
 
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class Sensor:
+    id: str     = field(metadata={'static': True})
+    start: int  = field(metadata={'static': True})
+    length: int = field(metadata={'static': True})
+
+
 @jax.jit
 def get_obs_and_reward_walking(env, sim, key):
-
+    # ---------------- Helpers ----------------
     def _quat_to_small_euler(q):
         qw, qx, qy, qz = q[0], q[1], q[2], q[3]
         yaw   = jnp.arctan2(2*(qw*qz + qx*qy), 1 - 2*(qy*qy + qz*qz))
         pitch = jnp.arcsin(jnp.clip(2*(qw*qy - qz*qx), -1.0, 1.0))
         roll  = jnp.arctan2(2*(qw*qx + qy*qz), 1 - 2*(qx*qx + qy*qy))
         return roll, pitch, yaw
-    
-    def _rotate_vector_inverse_rpy(roll, pitch, yaw, vector):
-        R_x = jnp.array([[1, 0, 0], [0, jnp.cos(roll), -jnp.sin(roll)], [0, jnp.sin(roll), jnp.cos(roll)]])
-        R_y = jnp.array([[jnp.cos(pitch), 0, jnp.sin(pitch)], [0, 1, 0], [-jnp.sin(pitch), 0, jnp.cos(pitch)]])
-        R_z = jnp.array([[jnp.cos(yaw), -jnp.sin(yaw), 0], [jnp.sin(yaw), jnp.cos(yaw), 0], [0, 0, 1]])
-        return (R_z @ R_y @ R_x).T @ vector
+
+    def _rotate_vector_inverse_rpy(roll, pitch, yaw, v):
+        R_x = jnp.array([[1, 0, 0],
+                         [0, jnp.cos(roll), -jnp.sin(roll)],
+                         [0, jnp.sin(roll),  jnp.cos(roll)]])
+        R_y = jnp.array([[ jnp.cos(pitch), 0, jnp.sin(pitch)],
+                         [0,               1,               0],
+                         [-jnp.sin(pitch), 0, jnp.cos(pitch)]])
+        R_z = jnp.array([[ jnp.cos(yaw), -jnp.sin(yaw), 0],
+                         [ jnp.sin(yaw),  jnp.cos(yaw), 0],
+                         [0, 0, 1]])
+        return (R_z @ R_y @ R_x).T @ v  # world->body
+
+    def _quat_rotate(q, v):
+        # Rotate vector v by quaternion q = [w,x,y,z]
+        w, x, y, z = q
+        q_xyz = jnp.array([x, y, z])
+        t = 2.0 * jnp.cross(q_xyz, v)
+        return v + w * t + jnp.cross(q_xyz, t)
+
+    def _expq2(x_sq, s):
+        # exp( - x^2 / (2 s^2) )
+        return jnp.exp(-x_sq / (2.0 * s * s + 1e-9))
 
     # ---------------- Core state & sensors ----------------
     d = env.mjx_data
@@ -74,18 +99,18 @@ def get_obs_and_reward_walking(env, sim, key):
     base_ang_accel = d.qacc[3:6]
 
     right_foot_pos = d.xpos[right_foot_body_id]
-    right_foot_vel = d.cvel[right_foot_body_id][3:]
     right_foot_q   = d.xquat[right_foot_body_id]
-    right_foot_ang_vel = d.cvel[right_foot_body_id][:3]
-    right_foot_force = d._impl.cfrc_ext[right_foot_body_id][3:]
-    right_foot_ground_contact = sim.get_collision(d, right_foot_geom_id, ground_geom_id)
+    right_foot_cvel_b = d.cvel[right_foot_body_id][3:]  # linear vel in foot frame
 
     left_foot_pos = d.xpos[left_foot_body_id]
-    left_foot_vel = d.cvel[left_foot_body_id][3:]
     left_foot_q   = d.xquat[left_foot_body_id]
-    left_foot_ang_vel = d.cvel[left_foot_body_id][:3]
+    left_foot_cvel_b  = d.cvel[left_foot_body_id][3:]   # linear vel in foot frame
+
+    right_foot_force = d._impl.cfrc_ext[right_foot_body_id][3:]
     left_foot_force = d._impl.cfrc_ext[left_foot_body_id][3:]
-    left_foot_ground_contact = sim.get_collision(d, left_foot_geom_id, ground_geom_id)
+
+    right_foot_ground_contact = sim.get_collision(d, right_foot_geom_id, ground_geom_id)
+    left_foot_ground_contact  = sim.get_collision(d, left_foot_geom_id, ground_geom_id)
 
     current_torque = d.ctrl[:]
     body_com = d.subtree_com[body_id]
@@ -105,11 +130,13 @@ def get_obs_and_reward_walking(env, sim, key):
     body_roll, body_pitch, body_yaw = _quat_to_small_euler(body_q)
     projected_gravity = _rotate_vector_inverse_rpy(body_roll, body_pitch, body_yaw, gravity_direction)
 
-    # rotate linear velocity into BODY frame (Isaac tracking is in base frame)
+    # rotate linear velocity into BODY frame (full RPY)
     body_vel = _rotate_vector_inverse_rpy(body_roll, body_pitch, body_yaw, body_vel_w)
     vx, vy, vz = body_vel
+
+    # body-frame angular velocity (for roll/pitch damping), and world-z yaw rate for yaw tracking
     base_ang_vel_b = _rotate_vector_inverse_rpy(body_roll, body_pitch, body_yaw, base_ang_vel)
-    wz = base_ang_vel_b[2]
+    wz_world = base_ang_vel[2]  # Isaac-style yaw tracking in WORLD z
     tilt = jnp.sqrt(body_roll * body_roll + body_pitch * body_pitch)
 
     # contacts
@@ -125,114 +152,123 @@ def get_obs_and_reward_walking(env, sim, key):
     gait_phase = (2 * jnp.pi * gait_freq * time_in_seconds) % (2 * jnp.pi)
     obs_gait = jnp.array([jnp.cos(gait_phase), jnp.sin(gait_phase)])
 
-    # ---------------- Isaac-like rewards & costs ----------------
-    # exp kernels
-    def _expq2(x_sq, s):
-        # exp( - x^2 / (2 s^2) )
-        return jnp.exp(-x_sq / (2.0 * s * s + 1e-9))
-
-    # commanded velocities (BODY frame), clipped
-    cmd_xy = goal_velocity[:2]
-    cmd_wz = goal_velocity[2]
+    # ---------------- Commands & tracking ----------------
+    cmd_xy = goal_velocity[:2]       # body-frame desired XY
+    cmd_wz = goal_velocity[2]        # desired yaw rate (we'll compare to world-z)
 
     cmd_lin_mag = jnp.linalg.norm(cmd_xy)
     standing = cmd_lin_mag < 0.15
+
+    v_xy = jnp.array([vx, vy])
+    # penalty for moving when commanded to stand
     c_move_when_standing = jnp.where(standing, jnp.sum(v_xy * v_xy), 0.0)
 
+    # zero XY command in standing mode for tracking terms
     cmd_xy = jnp.where(standing, cmd_xy*0, cmd_xy)
 
+    # Isaac-like: linear XY tracking in yaw-aligned frame (ignore roll/pitch)
+    vxvy_yaw = _rotate_vector_inverse_rpy(0.0, 0.0, body_yaw, body_vel_w)[:2]
+    err_xy   = jnp.sum((vxvy_yaw - cmd_xy) ** 2)
+
+    # Direction + speed blend (kept; helps against collapse)
     eps = 1e-6
-    v_norm   = jnp.linalg.norm(v_xy) + eps
-    cmd_norm = jnp.linalg.norm(cmd_xy) + eps
-
-    # direction-only (in [0,1])
-    cos_theta = jnp.clip(jnp.dot(v_xy, cmd_xy) / (v_norm * cmd_norm), -1.0, 1.0)
+    v_norm   = jnp.linalg.norm(vxvy_yaw) + eps
+    cmd_norm = jnp.linalg.norm(cmd_xy)   + eps
+    cos_theta = jnp.clip(jnp.dot(vxvy_yaw, cmd_xy) / (v_norm * cmd_norm), -1.0, 1.0)
     r_dir = 0.5 * (1.0 + cos_theta)
-
-    # speed-only
-    s_speed = 0.6  # will schedule later
-    r_spd = jnp.exp(-((v_norm - cmd_norm) ** 2) / (2.0 * s_speed * s_speed + 1e-9))
-
-    # blended linear tracking
-    alpha_dir = 0.7  # will schedule later
+    s_speed = 0.6
+    r_spd   = jnp.exp(-((v_norm - cmd_norm) ** 2) / (2.0 * s_speed * s_speed + 1e-9))
+    alpha_dir = 0.7
     r_trk_lin_xy = alpha_dir * r_dir + (1.0 - alpha_dir) * r_spd
 
-    # yaw-rate tracking (exp kernel)
-    r_trk_ang_z = _expq2((wz - cmd_wz) ** 2, s=0.5)
+    # Yaw-rate tracking in WORLD z (Isaac style)
+    r_trk_ang_z = jnp.exp(-((wz_world - cmd_wz) ** 2) / (0.5 * 0.5 + 1e-9))  # std=0.5
 
-    # "alive" (small positive bias for staying up)
+    # Alive (soft hinge recommended, but keep binary if you prefer)
     r_alive = (body_pos[2] > 0.20).astype(jnp.float32)
 
-    # costs (L2)
+    # ---------------- Costs ----------------
+    # vertical velocity only when standing
     c_lin_vel_z = jnp.where(standing, vz*vz, 0.0)
-    base_ang_vel_b = _rotate_vector_inverse_rpy(body_roll, body_pitch, body_yaw, base_ang_vel)
-    c_ang_vel_xy   = base_ang_vel_b[0]**2 + base_ang_vel_b[1]**2
 
-    # flat orientation: projected gravity XY L2 ~ 0 when upright
-    c_flat_orient = projected_gravity[0] * projected_gravity[0] + projected_gravity[1] * projected_gravity[1]
+    # roll/pitch damping in body frame
+    c_ang_vel_xy = base_ang_vel_b[0]**2 + base_ang_vel_b[1]**2
 
-    # base height L2 around target
+    # flat orientation cost (≈ roll^2 + pitch^2 for small angles)
+    c_flat_orient = projected_gravity[0]**2 + projected_gravity[1]**2
+
+    # height lower bound hinge
     z_min = 0.30
     c_base_height = jnp.maximum(z_min - body_pos[2], 0.0)**2
 
-    # torque regularizer (normalize by limit)
+    # torque/effort/smoothness
     tau_lim_cfg = jnp.array(sim.cfg["PPO"]["torque_limit"])
-    # support lists like [-4.9, 4.9] or per-joint ranges; take max magnitude
-    tau_max = jnp.max(jnp.abs(tau_lim_cfg))
-    tau_max = jnp.maximum(tau_max, 1e-6)
+    tau_max = jnp.maximum(jnp.max(jnp.abs(tau_lim_cfg)), 1e-6)
     c_tau = jnp.mean((current_torque / tau_max) ** 2)
-
-    # additional regularizers
     c_qd   = jnp.mean(joint_vel ** 2)
     c_act  = jnp.mean(current_action ** 2)
     c_dact = jnp.mean((current_action - prev_action) ** 2)
 
-    # joint limits (existing)
+    # joint limits: squared overflow hinge
     max_q = jnp.array(sim.cfg["PPO"]["joint_q_max"])
     min_q = jnp.array(sim.cfg["PPO"]["joint_q_min"])
     over  = jnp.clip(joint_pos - max_q, a_min=0.0)
     under = jnp.clip(min_q - joint_pos, a_min=0.0)
     joint_pos_limit = jnp.sum(over*over + under*under)
 
-    # deviation from default pose (existing)
-    c_joint_devation = jnp.linalg.norm(joint_pos - jnp.array(sim.cfg["PPO"]["default_qpos"]))
+    # deviation from nominal pose: gate to small command, use L1 like Isaac
+    cmd_small = (jnp.linalg.norm(cmd_xy) < 0.06).astype(jnp.float32)
+    c_joint_devation = cmd_small * jnp.sum(jnp.abs(joint_pos - jnp.array(sim.cfg["PPO"]["default_qpos"])))
 
-    # contact force penalty (approx of undesired contacts): penalize large impacts
-    fL = jnp.linalg.norm(left_foot_force)
+    # contact force penalty (forces only)
     fR = jnp.linalg.norm(right_foot_force)
-    F_MAX = 1.5 * body_mass * 9.81  # ~1.5 x body weight
+    fL = jnp.linalg.norm(left_foot_force)
+    F_MAX = 1.5 * body_mass * 9.81
     c_contact_force = jnp.maximum(0.0, fL - F_MAX) + jnp.maximum(0.0, fR - F_MAX)
 
+    # foot slip penalty (Isaac-like "feet_slide")
+    # convert foot linear vel to WORLD using foot orientation
+    right_foot_vel_w = _quat_rotate(right_foot_q, right_foot_cvel_b)
+    left_foot_vel_w  = _quat_rotate(left_foot_q,  left_foot_cvel_b)
+    foot_speed_R = jnp.linalg.norm(right_foot_vel_w[:2])
+    foot_speed_L = jnp.linalg.norm(left_foot_vel_w[:2])
+    F_SLIP = 0.5 * body_mass * 9.81 / 10.0  # ~0.05g threshold
+    in_contact_R = (fR > F_SLIP).astype(jnp.float32)
+    in_contact_L = (fL > F_SLIP).astype(jnp.float32)
+    c_foot_slide = in_contact_R * foot_speed_R + in_contact_L * foot_speed_L
+
     # ---------------- Weights (per-second) -> scale by dt_model ----------------
-    dt_model = 1.0 / sim.cfg["PPO"]["model_freq"]   # your policy/reward rate = 50 Hz => 0.02 s
+    dt_model = 1.0 / sim.cfg["PPO"]["model_freq"]   # e.g., 0.02 s @ 50 Hz
 
     # ---------- POSITIVE (per-second) ----------
-    w_trk_lin_ps      = 8.0      # main driver; ~0.16 per-step at dt=0.02
-    w_trk_ang_ps      = 1.0      # stable turning incentive
-    w_alive_ps        = 0.5      # small bias to stay upright
-    w_single_ps       = 1.2      # promotes stepping when moving
-    w_dsup_ps         = 0.2      # encourages double support when standing
+    w_trk_lin_ps      = 8.0
+    w_trk_ang_ps      = 1.0
+    w_alive_ps        = 0.5
+    w_single_ps       = 1.2
+    w_dsup_ps         = 0.2
 
     # ---------- NEGATIVE (per-second) ----------
-    w_lin_z_ps        = 0.7      # penalize vertical motion (only when standing)
-    w_ang_xy_ps       = 0.2      # resist roll/pitch angular velocity
-    w_flat_ps         = 0.8      # upright posture cost
-    w_hgt_ps          = 0.9      # keep COM above minimum height
-    w_tau_ps          = 0.3      # effort regularizer (normalized torque)
-    w_qd_ps           = 0.05     # joint velocity smoothing
-    w_act_ps          = 0.002    # tiny redundancy term; may set to 0.0
-    w_dact_ps         = 0.5      # action-change penalty for smoothness
-    w_jlim_ps         = 2.0      # soft squared hinge joint-limit penalty
-    w_jointdev_ps     = 0.05     # mild pull toward nominal pose
-    w_cfor_ps         = 5e-3     # contact-force spike penalty
-    w_flight_ps       = 0.3      # discourages excessive flight
-    w_move_stand_ps   = 1.5      # penalize drifting when commanded to stand
+    w_lin_z_ps        = 0.7
+    w_ang_xy_ps       = 0.2
+    w_flat_ps         = 0.8
+    w_hgt_ps          = 0.9
+    w_tau_ps          = 0.3
+    w_qd_ps           = 0.05
+    w_act_ps          = 0.002
+    w_dact_ps         = 0.5
+    w_jlim_ps         = 2.0
+    w_jointdev_ps     = 0.05
+    w_cfor_ps         = 5e-3
+    w_flight_ps       = 0.3
+    w_move_stand_ps   = 1.5
+    w_slide_ps        = 0.4   # NEW: foot slip penalty
 
     # scale by dt_model
     w_trk_lin  = w_trk_lin_ps  * dt_model
     w_trk_ang  = w_trk_ang_ps  * dt_model
     w_alive    = w_alive_ps    * dt_model
     w_single   = w_single_ps   * dt_model
+    w_dsup     = w_dsup_ps     * dt_model
 
     w_lin_z    = w_lin_z_ps    * dt_model
     w_ang_xy   = w_ang_xy_ps   * dt_model
@@ -246,21 +282,16 @@ def get_obs_and_reward_walking(env, sim, key):
     w_jointdev = w_jointdev_ps * dt_model
     w_cfor     = w_cfor_ps     * dt_model
     w_flight   = w_flight_ps   * dt_model
-    w_dsup     = w_dsup_ps     * dt_model
     w_move_stand = w_move_stand_ps * dt_model
+    w_slide    = w_slide_ps    * dt_model
 
     # effective (piecewise) support/flight weights
     w_single_eff = jnp.where(standing, -2 * w_single,  w_single)
     w_dsup_eff   = jnp.where(standing,  2 * w_dsup,   -w_dsup)
+    w_flat_eff   = jnp.where(standing, w_flat, 0.5 * w_flat)
 
-    w_flat_eff = jnp.where(standing, w_flat, 0.5 * w_flat)
-
-    # ---------------- Assemble reward (no clamping; negatives allowed) ----------------
-    # support / flight terms depend on standing vs moving
-    support_reward = (
-        w_single_eff  * single_support
-        + w_dsup_eff    * double_support
-    )
+    # ---------------- Assemble reward ----------------
+    support_reward = w_single_eff * single_support + w_dsup_eff * double_support
 
     reward_pos = (
         w_trk_lin * r_trk_lin_xy
@@ -272,7 +303,7 @@ def get_obs_and_reward_walking(env, sim, key):
     reward_neg = (
         w_lin_z   * c_lin_vel_z
         + w_ang_xy  * c_ang_vel_xy
-        + w_flat_eff    * c_flat_orient
+        + w_flat_eff * c_flat_orient
         + w_hgt     * c_base_height
         + w_tau     * c_tau
         + w_qd      * c_qd
@@ -283,6 +314,7 @@ def get_obs_and_reward_walking(env, sim, key):
         + w_cfor    * c_contact_force
         + w_flight  * flight
         + w_move_stand * c_move_when_standing
+        + w_slide   * c_foot_slide
     )
 
     reward = reward_pos - reward_neg
@@ -290,13 +322,14 @@ def get_obs_and_reward_walking(env, sim, key):
     # ---------------- Done flags ----------------
     fallen = (body_pos[2] < 0.20)
     done = (fallen) | (step_num > sim.cfg["PPO"]["max_timesteps"])
+    # NOTE: if your pipeline expects booleans, remove the -1 sentinel
     done = jnp.where((done == 0) & ((step_num + 1) % 100 == 0), -1, done)
 
     # ---------------- Obs vector ----------------
     obs = jnp.concatenate([
         goal_velocity,                 # (3,)
         projected_gravity,             # (3,)
-        base_ang_vel,                  # (3,)
+        base_ang_vel,                  # (3,) world ang vel (kept)
         joint_pos,                     # (..)
         joint_vel,                     # (..)
         prev_action,                   # (..)
@@ -315,15 +348,13 @@ def get_obs_and_reward_walking(env, sim, key):
         "r_trk_lin_xy":      w_trk_lin * r_trk_lin_xy,
         "r_trk_ang_z":       w_trk_ang * r_trk_ang_z,
         "r_alive":           w_alive   * r_alive,
-
-        # support
         "r_single":          w_single_eff * single_support,
         "r_double":          w_dsup_eff   * double_support,
 
         # negative
         "c_lin_vel_z":       -w_lin_z   * c_lin_vel_z,
         "c_ang_vel_xy":      -w_ang_xy  * c_ang_vel_xy,
-        "c_flat_orient":     -w_flat_eff    * c_flat_orient,
+        "c_flat_orient":     -w_flat_eff * c_flat_orient,
         "c_base_height":     -w_hgt     * c_base_height,
         "c_tau":             -w_tau     * c_tau,
         "c_qd":              -w_qd      * c_qd,
@@ -332,11 +363,13 @@ def get_obs_and_reward_walking(env, sim, key):
         "joint_pos_limit":   -w_jlim    * joint_pos_limit,
         "c_joint_dev":       -w_jointdev* c_joint_devation,
         "c_contact_force":   -w_cfor    * c_contact_force,
-        "flight":            -w_flight * flight,
-        # optional helpers
+        "flight":            -w_flight  * flight,
+        "c_foot_slide":      -w_slide   * c_foot_slide,
+
+        # helpers
         "cmd_vx": cmd_xy[0], "cmd_vy": cmd_xy[1], "cmd_wz": cmd_wz,
-        "vx": vx, "vy": vy, "vz": vz, "wz": wz,
+        "vx": vx, "vy": vy, "vz": vz, "wz_world": wz_world,
+        "cos_theta": cos_theta, "v_norm": v_norm, "cmd_norm": cmd_norm,
     })
 
     return obs, reward, done, reward_terms
-
