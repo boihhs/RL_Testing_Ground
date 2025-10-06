@@ -100,11 +100,11 @@ def get_obs_and_reward_walking(env, sim, key):
 
     right_foot_pos = d.xpos[right_foot_body_id]
     right_foot_q   = d.xquat[right_foot_body_id]
-    right_foot_cvel_b = d.cvel[right_foot_body_id][3:]  # linear vel in foot frame
+    right_foot_vel_w = d.cvel[right_foot_body_id][3:]
 
     left_foot_pos = d.xpos[left_foot_body_id]
     left_foot_q   = d.xquat[left_foot_body_id]
-    left_foot_cvel_b  = d.cvel[left_foot_body_id][3:]   # linear vel in foot frame
+    left_foot_vel_w  = d.cvel[left_foot_body_id][3:]
 
     right_foot_force = d._impl.cfrc_ext[right_foot_body_id][3:]
     left_foot_force = d._impl.cfrc_ext[left_foot_body_id][3:]
@@ -226,10 +226,6 @@ def get_obs_and_reward_walking(env, sim, key):
     F_MAX = 1.5 * body_mass * 9.81
     c_contact_force = jnp.maximum(0.0, fL - F_MAX) + jnp.maximum(0.0, fR - F_MAX)
 
-    # foot slip penalty (Isaac-like "feet_slide")
-    # convert foot linear vel to WORLD using foot orientation
-    right_foot_vel_w = _quat_rotate(right_foot_q, right_foot_cvel_b)
-    left_foot_vel_w  = _quat_rotate(left_foot_q,  left_foot_cvel_b)
     foot_speed_R = jnp.linalg.norm(right_foot_vel_w[:2])
     foot_speed_L = jnp.linalg.norm(left_foot_vel_w[:2])
     F_SLIP = 0.5 * body_mass * 9.81 / 10.0  # ~0.05g threshold
