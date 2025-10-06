@@ -141,7 +141,7 @@ STD:
   std_qpos: .0
   std_qvel: .0
   std_force: 0
-  std_goal_velocity: 2
+  std_goal_velocity: .5
 
 Rewards:
   alive:          0.5      # ↓   standing starts at only +0.5

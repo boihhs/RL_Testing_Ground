@@ -135,7 +135,7 @@ def get_obs_and_reward_walking(env, sim, key):
     cmd_wz = goal_velocity[2]
 
     cmd_lin_mag = jnp.linalg.norm(cmd_xy)
-    standing = cmd_lin_mag < 0.08
+    standing = cmd_lin_mag < 0.15
 
     # linear XY tracking (exp kernel)
     v_xy = jnp.array([vx, vy])
@@ -204,7 +204,7 @@ def get_obs_and_reward_walking(env, sim, key):
     w_act_ps     = 0.05
     w_dact_ps    = 0.10
     w_jlim_ps    = 5.0
-    w_jointdev_ps= 0.20
+    w_jointdev_ps= 0.5
     w_cfor_ps    = 1e-3
     w_flight_ps  = 0.20
     w_single_ps  = 1.0
@@ -231,8 +231,8 @@ def get_obs_and_reward_walking(env, sim, key):
     w_dsup     = w_dsup_ps     * dt_model
 
     # effective (piecewise) support/flight weights
-    w_single_eff = jnp.where(standing, -w_single,  w_single)
-    w_dsup_eff   = jnp.where(standing,  w_dsup,   -w_dsup)
+    w_single_eff = jnp.where(standing, -2 * w_single,  w_single)
+    w_dsup_eff   = jnp.where(standing,  2 * w_dsup,   -w_dsup)
 
     w_flat_eff = jnp.where(standing, w_flat, 0.5 * w_flat)
 
