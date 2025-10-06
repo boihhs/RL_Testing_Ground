@@ -140,8 +140,9 @@ class ViewerRunner:
 
                 self.key, subkey = jax.random.split(self.key)
                 obs, reward, done, _ = get_obs_and_reward_walking(self.env, self.sim, subkey)
-                print(reward)
-                print(self.env.goal_velocity)
+                # print(reward)
+                # print(self.env.goal_velocity)
+                print(self.mj_data.cfrc_ext)
                 action = self.step_policy(obs)
                 self.rewards.append(reward)
 

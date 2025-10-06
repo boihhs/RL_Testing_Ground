@@ -54,6 +54,8 @@ class Sim:
 
         self.body_id = mjx.name2id(self.mjx_model, mujoco.mjtObj.mjOBJ_BODY, "Trunk")
 
+        self.
+
     @jax.jit
     def generate_mjx_model(self, key):
         mjx_model = self.mjx_model
