@@ -193,5 +193,5 @@ if __name__ == "__main__":
     cfg_file = "/home/leo-benaharon/Desktop/RL_Testing_Ground/RL_Algos/PPO.yaml"
 
     # Run deterministic evaluation
-    runner = ViewerRunner(cfg_file, goal_vel=jnp.array([0, 0, 0]), deterministic=False)
+    runner = ViewerRunner(cfg_file, goal_vel=jnp.array([0, 0, 0]), deterministic=True)
     runner.run()

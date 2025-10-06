@@ -247,16 +247,16 @@ def get_obs_and_reward_walking(env, sim, key):
     w_ang_xy_ps       = 0.2
     w_flat_ps         = 0.8
     w_hgt_ps          = 0.9
-    w_tau_ps          = 0.3
+    w_tau_ps          = 0.05
     w_qd_ps           = 0.05
     w_act_ps          = 0.002
-    w_dact_ps         = 0.5
+    w_dact_ps         = 0.01
     w_jlim_ps         = 2.0
     w_jointdev_ps     = 0.05
     w_cfor_ps         = 5e-3
     w_flight_ps       = 0.3
     w_move_stand_ps   = .2
-    w_slide_ps        = 0.4   # NEW: foot slip penalty
+    w_slide_ps        = 0.05   # NEW: foot slip penalty
 
     # scale by dt_model
     w_trk_lin  = w_trk_lin_ps  * dt_model
