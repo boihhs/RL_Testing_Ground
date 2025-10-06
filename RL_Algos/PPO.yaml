@@ -15,7 +15,7 @@ PPO:
   entropy_coef:  -.05
   
   mini_batch_loops: 10
-  num_epocs: 1500
+  num_epocs: 3000
   max_timesteps: 1500
   horizon_length: 24
 
