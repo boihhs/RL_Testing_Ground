@@ -56,12 +56,9 @@
       </default>
 
       <!-- Global joint + actuator defaults -->
-      <joint frictionloss="0.1" armature=".0018"/>
-      <position inheritrange="1" kp="75" kv="5"/>
+      <joint damping="0.56" frictionloss="0.068" armature="0.027"/>
 
-      
-
-      <motor ctrllimited="true" ctrlrange="-4.9 4.9" gear="1"/>
+      <motor ctrllimited="true" ctrlrange="-3.23 3.23" gear="1"/>
       <!-- Shoulder -->
       <default class="shoulder">
         <default class="shoulder_pitch">

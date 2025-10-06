@@ -225,6 +225,12 @@ def get_obs_and_reward_walking(env, sim, key):
     in_contact_L = (fL > F_SLIP).astype(jnp.float32)
     c_foot_slide = in_contact_R * foot_speed_R + in_contact_L * foot_speed_L
 
+    # COM alignment with feet average
+    feet_avg_pos = 0.5 * (left_foot_pos + right_foot_pos)
+    com_xy_dist = jnp.linalg.norm(body_com[:2] - feet_avg_pos[:2])
+    sigma_com = 0.08
+    r_com_align = jnp.exp(-(com_xy_dist ** 2) / (2.0 * sigma_com ** 2)) * single_support
+
     # ---------------- Weights (per-second) -> scale by dt_model ----------------
     dt_model = 1.0 / sim.cfg["PPO"]["model_freq"]   # e.g., 0.02 s @ 50 Hz
 
@@ -234,6 +240,7 @@ def get_obs_and_reward_walking(env, sim, key):
     w_alive_ps        = 0.5
     w_single_ps       = 2
     w_dsup_ps         = 0.2
+    w_com_ps = 1.5
 
     # ---------- NEGATIVE (per-second) ----------
     w_lin_z_ps        = 0.7
@@ -257,6 +264,7 @@ def get_obs_and_reward_walking(env, sim, key):
     w_alive    = w_alive_ps    * dt_model
     w_single   = w_single_ps   * dt_model
     w_dsup     = w_dsup_ps     * dt_model
+    w_com = w_com_ps * dt_model
 
     w_lin_z    = w_lin_z_ps    * dt_model
     w_ang_xy   = w_ang_xy_ps   * dt_model
@@ -303,6 +311,7 @@ def get_obs_and_reward_walking(env, sim, key):
         + w_flight  * flight
         + w_move_stand * c_move_when_standing
         + w_slide   * c_foot_slide
+        + w_com * r_com_align
     )
 
     reward = reward_pos - reward_neg
@@ -337,6 +346,7 @@ def get_obs_and_reward_walking(env, sim, key):
         "r_alive":           w_alive   * r_alive,
         "r_single":          w_single_eff * single_support,
         "r_double":          w_dsup_eff   * double_support,
+        "r_com_align": w_com * r_com_align,
 
         # negative
         "c_lin_vel_z":       -w_lin_z   * c_lin_vel_z,
