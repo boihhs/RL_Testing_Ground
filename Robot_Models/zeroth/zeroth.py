@@ -149,7 +149,7 @@ def get_obs_and_reward_walking(env, sim, key):
     cmd_wz = goal_velocity[2]        # desired yaw rate (we'll compare to world-z)
 
     cmd_lin_mag = jnp.linalg.norm(cmd_xy)
-    standing = cmd_lin_mag < 0.15
+    standing = cmd_lin_mag < 0.05
 
     v_xy = jnp.array([vx, vy])
     # penalty for moving when commanded to stand
@@ -229,10 +229,10 @@ def get_obs_and_reward_walking(env, sim, key):
     dt_model = 1.0 / sim.cfg["PPO"]["model_freq"]   # e.g., 0.02 s @ 50 Hz
 
     # ---------- POSITIVE (per-second) ----------
-    w_trk_lin_ps      = 8.0
-    w_trk_ang_ps      = 1.0
+    w_trk_lin_ps      = 12.0
+    w_trk_ang_ps      = 2.0
     w_alive_ps        = 0.5
-    w_single_ps       = 1.2
+    w_single_ps       = 2
     w_dsup_ps         = 0.2
 
     # ---------- NEGATIVE (per-second) ----------
@@ -248,7 +248,7 @@ def get_obs_and_reward_walking(env, sim, key):
     w_jointdev_ps     = 0.05
     w_cfor_ps         = 5e-3
     w_flight_ps       = 0.3
-    w_move_stand_ps   = 1.5
+    w_move_stand_ps   = .2
     w_slide_ps        = 0.4   # NEW: foot slip penalty
 
     # scale by dt_model
@@ -274,8 +274,8 @@ def get_obs_and_reward_walking(env, sim, key):
     w_slide    = w_slide_ps    * dt_model
 
     # effective (piecewise) support/flight weights
-    w_single_eff = jnp.where(standing, -2 * w_single,  w_single)
-    w_dsup_eff   = jnp.where(standing,  2 * w_dsup,   -w_dsup)
+    w_single_eff = jnp.where(standing, -.5 * w_single,  w_single)
+    w_dsup_eff   = jnp.where(standing,  .5 * w_dsup,   -w_dsup)
     w_flat_eff   = jnp.where(standing, w_flat, 0.5 * w_flat)
 
     # ---------------- Assemble reward ----------------
@@ -310,8 +310,7 @@ def get_obs_and_reward_walking(env, sim, key):
     # ---------------- Done flags ----------------
     fallen = (body_pos[2] < 0.20)
     done = (fallen) | (step_num > sim.cfg["PPO"]["max_timesteps"])
-    # NOTE: if your pipeline expects booleans, remove the -1 sentinel
-    done = jnp.where((done == 0) & ((step_num + 1) % 100 == 0), -1, done)
+    done = jnp.where((done == 0) & ((step_num + 1) % 200 == 0), -1, done)
 
     # ---------------- Obs vector ----------------
     obs = jnp.concatenate([

@@ -150,7 +150,7 @@ class Sim:
 
             key, subkey = jax.random.split(key)
             qpos = jnp.array(self.cfg["PPO"]["init_pos"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_pos"]).shape) * self.cfg["STD"]["std_joint_pos"]
-            qpos = qpos.at[2].set(.32)
+            qpos = qpos.at[2].set(jnp.array(self.cfg["PPO"]["init_pos"])[2])
             key, subkey = jax.random.split(key)
             qvel = jnp.array(self.cfg["PPO"]["init_vel"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_vel"]).shape) * self.cfg["STD"]["std_joint_vel"]
             
