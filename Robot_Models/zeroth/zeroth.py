@@ -23,14 +23,6 @@ class Sensor:
     length: int     = field(metadata={'static': True})
 
 
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
-class Sensor:
-    id: str     = field(metadata={'static': True})
-    start: int  = field(metadata={'static': True})
-    length: int = field(metadata={'static': True})
-
-
 @jax.jit
 def get_obs_and_reward_walking(env, sim, key):
     # ---------------- Helpers ----------------
