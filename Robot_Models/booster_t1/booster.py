@@ -121,7 +121,7 @@ def get_obs_and_reward_walking(env, sim, key):
     h_des = 0.65
     tau_limit = jnp.array(sim.cfg["PPO"]["torque_limit"])
     max_q = jnp.array(sim.cfg["PPO"]["joint_q_max"])
-    min_q = jnp.array(sim.cfg["PPO"]["joint_q_min"])
+    min_q = mj_model
 
 
     time_in_seconds = step_num * (1 / sim.cfg["PPO"]["model_freq"])

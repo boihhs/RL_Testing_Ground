@@ -1,170 +1,195 @@
-"""
-Run a trained PPO policy in MuJoCo viewer at 60 FPS.
-"""
-
-import time, re, threading
+import time, re
 from pathlib import Path
-from Models.Policy import Policy
-from Mujoco_Env.Sim import ENVS, Sim, MODEL
-from Robot_Models.booster_t1.booster import get_obs_and_reward_walking
-import mujoco
-from mujoco import viewer
-from pynput import keyboard
-import yaml
 import numpy as np
 import jax, jax.numpy as jnp
-from flax.training import checkpoints
 from jax import random
-from mujoco import mjx
+from flax.training import checkpoints
+import mujoco
+from mujoco import viewer, mjx
+from pynput import keyboard
+import yaml
 
-def print_pytree_structure(pytree, indent=0, path=""):
-    if isinstance(pytree, dict):
-        for key, value in pytree.items():
-            print("  " * indent + f"{path + str(key)}:")
-            print_pytree_structure(value, indent + 1, path + str(key) + ".")
-    elif isinstance(pytree, (list, tuple)):
-        for i, value in enumerate(pytree):
-            print("  " * indent + f"{path}[{i}]:")
-            print_pytree_structure(value, indent + 1, path + f"[{i}].")
-    else:
-        print("  " * indent + f"{path[:-1]}")
+from Models.Policy import Policy
+from Mujoco_Env.Sim import ENVS, Sim, MODEL
+from Robot_Models.zeroth.zeroth import get_obs_and_reward_walking
 
+class ViewerRunner:
+    def __init__(self, cfg_file: str, goal_vel: jnp.array([0, 0, 0]), deterministic: bool = True):
+        # --- Load config
+        with open(cfg_file, "r", encoding="utf-8") as f:
+            self.cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
 
-cfg_file = "/home/leo-benaharon/Desktop/RL_Testing_Ground/RL_Algos/PPO.yaml"
-with open(cfg_file, "r", encoding="utf-8") as f:
-            cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
+        self.key = random.PRNGKey(8)
+        self.deterministic = deterministic   # <── NEW flag
+        self.ckpt_dir = Path("checkpoints").absolute()
+        self.ckpt_prefix = "policy_"
 
-CKPT_DIR = Path("checkpoints").absolute()
-CKPT_PREFIX = "policy_"            # adjust if you used a different prefix
-DT_TARGET = 1.0 / 60.0             # 60 FPS
+        # --- Load MuJoCo model
+        self.mj_model = mujoco.MjModel.from_xml_path(self.cfg["PPO"]["xml_path"])
+        self.mj_data = mujoco.MjData(self.mj_model)
 
-# ── 0. MuJoCo sizes ────────────────────────────────────────────────────────
-mj_model = mujoco.MjModel.from_xml_path(cfg["PPO"]["xml_path"])
-nq, nv, nu = mj_model.nq, mj_model.nv, mj_model.nu
+        # Reset to keyframe "home"
+        self.kf_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_KEY, "home")
+        mujoco.mj_resetDataKeyframe(self.mj_model, self.mj_data, self.kf_id)
 
-key = random.PRNGKey(8)
-key, subkey = jax.random.split(key)
-policy = Policy(jnp.array(cfg["PPO"]["policy_model_shape"]), jnp.array(cfg["PPO"]["default_qpos"]), subkey)
+        # --- Wrap in MJX
+        self.mjx_data = mjx.put_data(self.mj_model, self.mj_data)
 
-params_template = policy
+        # --- Env wrapper
+        self.env = ENVS(
+            self.mjx_data,
+            MODEL(jnp.array(self.mj_model.body_mass), None, None, None, None, None),
+            jnp.array(self.cfg["PPO"]["default_qpos"]),
+            jnp.array(self.cfg["PPO"]["default_qpos"]),
+            0,
+            None,
+            None,
+            jnp.array([0, 0]),               # force_applied
+            goal_vel,         # goal velocity
+            None
+        )
+        self.sim = Sim(self.cfg)
 
-ckpt_path = checkpoints.latest_checkpoint(CKPT_DIR, prefix=CKPT_PREFIX)
-if ckpt_path:
-    policy = checkpoints.restore_checkpoint(ckpt_path, target=params_template)
-    step   = int(re.search(r"_([0-9]+)$", ckpt_path).group(1))
-    print(f"✓ loaded step {step} from {ckpt_path}")
-else:
-    print("[WARN] no checkpoint found; using random weights.")
-    policy = params_template
+        # --- Build Flax policy module
+        self.policy_module = Policy(
+            layer_sizes=jnp.array(self.cfg["PPO"]["policy_model_shape"]),
+            action_bias=jnp.array(self.cfg["PPO"]["default_qpos"])
+        )
 
+        # Init params (dummy obs with correct dim)
+        self.key, subkey = jax.random.split(self.key)
+        dummy_obs = jnp.ones((self.cfg["PPO"]["policy_state_dim"],))
+        self.policy_params = self.policy_module.init(subkey, dummy_obs)
 
-# ── 4. Keys for manual overrides (optional) ────────────────────────────────
-pressed_keys = set()
-def on_press(key):
-    try:    pressed_keys.add(key.char)
-    except AttributeError: pressed_keys.add(str(key))
-def on_release(key):
-    try:    pressed_keys.discard(key.char)
-    except AttributeError: pressed_keys.discard(str(key))
-keyboard.Listener(on_press=on_press, on_release=on_release).start()
-
-# ── 5. Actuator IDs, camera, keyframe reset ────────────────────────────────
-
-kf_id  = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_KEY, "home")
-
-mj_data = mujoco.MjData(mj_model)
-print(mj_model.body_mass)
-mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
-
-mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
-
-episode_start = time.time()
-DT_CONTROL = 1.0 / cfg["PPO"]["model_freq"]
-
-mjx_data = mjx.put_data(mj_model, mj_data)
-curr_action = jnp.array(cfg["PPO"]["default_qpos"])
-prev_action = jnp.array(cfg["PPO"]["default_qpos"])
-step_num = 0
-
-goal_velicy = jnp.array([-5, 0, 0])
-
-model = MODEL(jnp.array(mj_model.body_mass), None, None, None, None, None)
-push_force = jnp.array([0, 0])
-
-env = ENVS(mjx_data, model, curr_action, prev_action, step_num, None, None, push_force, goal_velicy, None)
-sim = Sim(cfg)
-
-prev_action = jnp.array(cfg["PPO"]["default_qpos"])
-rewards = []
-
-i = 0
-with viewer.launch_passive(mj_model, mj_data) as v:
-    while v.is_running():
-        frame_start = time.time()
-
-        d = mj_data
-        
-        key, subkey = jax.random.split(key)
-        obs, reward, done = get_obs_and_reward_walking(env, sim, subkey)
-        
-
-        policy_obs = obs[:cfg["PPO"]["policy_state_dim"]]
-       
-        actions= policy.get_raw_action(policy_obs[None, :])
-        
-        # key, subkey = jax.random.split(key)
-        # actions= policy.get_action(policy_obs[None, :], subkey)
-
-        action = actions[0]
-    
-        # print(reward)
-        # print(done)
-        rewards.append(reward)
-    
-        # print(data.xfrc_applied[body_id][3:])
-        i = i + 1
-        # print(action)
-        # 3. physics stepping until next control tick
-        sim_t0 = mj_data.time
-        while (mj_data.time - sim_t0) < DT_CONTROL:
-
-            joint_pos = mj_data.qpos[7:]
-            joint_vel = mj_data.qvel[6:]
-            ctrl = jnp.array(cfg["PPO"]["stiffness"]) * (action - joint_pos) - jnp.array(cfg["PPO"]["damping"]) * (joint_vel)
-
-            # ctrl = jnp.array(cfg["PPO"]["stiffness"]) * (jnp.array(cfg["PPO"]["default_qpos"]) - joint_pos) - jnp.array(cfg["PPO"]["damping"]) * (joint_vel)
-            # print(ctrl)
-            ctrl = ctrl.clip(-jnp.array(cfg["PPO"]["torque_limit"]), jnp.array(cfg["PPO"]["torque_limit"]))
-            mj_data.ctrl[:] = np.asarray(ctrl, dtype=np.float64) 
-
-            mujoco.mj_step(mj_model, mj_data)
-
-        # render frame
-        v.sync()
-
-        if i % 100 == 0:
-            if goal_velicy[0] == -5:
-                goal_velicy = goal_velicy.at[0].set(5)
+        # Restore checkpoint if available
+        ckpt_path = checkpoints.latest_checkpoint(self.ckpt_dir, prefix=self.ckpt_prefix)
+        if ckpt_path:
+            restored = checkpoints.restore_checkpoint(
+                ckpt_path, target={"policy_params": self.policy_params}
+            )
+            if isinstance(restored, dict) and "policy_params" in restored:
+                self.policy_params = restored["policy_params"]
             else:
-                goal_velicy = goal_velicy.at[0].set(-5)
-
-        # real‑time pacing
-        sleep_t = DT_CONTROL - (time.time() - frame_start)
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-
-        # auto‑reset
-        if (done):
-            mujoco.mj_resetDataKeyframe(mj_model, mj_data, kf_id)
-            episode_start = time.time()
-            print("hello")
-            print(np.mean(np.array(rewards)))
-            rewards = []
-            i = 0
-            mjx_data = mjx.put_data(mj_model, mj_data)
-            env = ENVS(mjx_data, env.model, jnp.array(cfg["PPO"]["default_qpos"]), jnp.array(cfg["PPO"]["default_qpos"]), 0, None, None, env.force_applied, env.goal_velocity, None)
+                self.policy_params = restored
+            step = int(re.search(r"_([0-9]+)$", ckpt_path).group(1))
+            print(f"✓ Loaded step {step} from {ckpt_path}")
         else:
-            mjx_data = mjx.put_data(mj_model, mj_data)
-            env = ENVS(mjx_data, env.model, action, env.curr_action, env.step_num + 1, None, None, env.force_applied, goal_velicy, None)
+            print("[WARN] No checkpoint found; using random weights.")
 
-            
+        # --- Key listener
+        self.pressed_keys = set()
+        def on_press(key):
+            try:    self.pressed_keys.add(key.char)
+            except AttributeError: self.pressed_keys.add(str(key))
+        def on_release(key):
+            try:    self.pressed_keys.discard(key.char)
+            except AttributeError: self.pressed_keys.discard(str(key))
+        keyboard.Listener(on_press=on_press, on_release=on_release).start()
+
+        # --- Control timing
+        self.dt_control = 1.0 / self.cfg["PPO"]["model_freq"]
+
+        # Rewards history
+        self.rewards = []
+
+    def step_policy(self, obs):
+        """Compute policy action from observation."""
+        pol_obs = obs[:self.cfg["PPO"]["policy_state_dim"]]
+
+        if self.deterministic:
+            # Deterministic evaluation
+            action = self.policy_module.get_raw_action(
+                self.policy_params, pol_obs[None, :])[0]
+        else:
+            # Stochastic sampling (adds noise via log_std)
+            self.key, subkey = jax.random.split(self.key)
+            action = self.policy_module.get_action(
+                self.policy_params, pol_obs[None, :], subkey)[0]
+
+        return action
+
+    def control_loop(self, action):
+        """Apply PD control and step MuJoCo physics until next control tick."""
+        sim_t0 = self.mj_data.time
+        while (self.mj_data.time - sim_t0) < self.dt_control:
+            joint_pos = self.mj_data.qpos[7:]
+            joint_vel = self.mj_data.qvel[6:]
+            # action = jnp.array(jnp.array(self.cfg["PPO"]["default_qpos"]))
+
+            xfrc_applied_body = jnp.zeros(self.mj_data.xfrc_applied[self.sim.body_id].shape).at[3:5].set(self.env.force_applied)
+            xfrc_applied = jnp.zeros(self.mj_data.xfrc_applied.shape).at[self.sim.body_id].set(xfrc_applied_body)
+
+            ctrl = (
+                jnp.array(self.cfg["PPO"]["stiffness"]) * (action - joint_pos)
+                - jnp.array(self.cfg["PPO"]["damping"]) * joint_vel
+            )
+            ctrl = ctrl.clip(
+                -jnp.array(self.cfg["PPO"]["torque_limit"]),
+                 jnp.array(self.cfg["PPO"]["torque_limit"])
+            )
+            self.mj_data.ctrl[:] = np.asarray(ctrl, dtype=np.float64)
+            self.mj_data.xfrc_applied[:] = np.asarray(xfrc_applied, dtype=np.float64)
+            mujoco.mj_step(self.mj_model, self.mj_data)
+
+    def run(self):
+        """Main viewer loop."""
+        with viewer.launch_passive(self.mj_model, self.mj_data) as v:
+            i = 0
+            while v.is_running():
+                frame_start = time.time()
+
+                self.key, subkey = jax.random.split(self.key)
+                obs, reward, done, _ = get_obs_and_reward_walking(self.env, self.sim, subkey)
+                print(reward)
+                print(self.env.goal_velocity)
+                action = self.step_policy(obs)
+                self.rewards.append(reward)
+
+                self.control_loop(action)
+
+                v.sync()
+
+                sleep_t = self.dt_control - (time.time() - frame_start)
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+
+                if (done == 1):
+                    mujoco.mj_resetDataKeyframe(self.mj_model, self.mj_data, self.kf_id)
+                    episode_start = time.time()
+                    print(np.mean(np.array(self.rewards)))
+                    self.rewards = []
+                    i = 0
+                    mjx_data = mjx.put_data(self.mj_model, self.mj_data)
+                    self.env = ENVS(mjx_data, self.env.model, jnp.array(self.cfg["PPO"]["default_qpos"]), jnp.array(self.cfg["PPO"]["default_qpos"]), 0, None, None, self.env.force_applied, self.env.goal_velocity, None)
+                else:
+                    if 'w' in self.pressed_keys:
+                        goal_velocity = jnp.array([0, -.1, 0]) + self.env.goal_velocity
+                    elif 's' in self.pressed_keys:
+                        goal_velocity = jnp.array([0, .1, 0]) + self.env.goal_velocity
+                    elif 'a' in self.pressed_keys:
+                        goal_velocity = jnp.array([-.1, 0, 0]) + self.env.goal_velocity
+                    elif 'd' in self.pressed_keys:
+                        goal_velocity = jnp.array([0.1, 0, 0]) + self.env.goal_velocity
+                    elif 'e' in self.pressed_keys:
+                        goal_velocity = jnp.array([0., 0, -.1]) + self.env.goal_velocity
+                    elif 'q' in self.pressed_keys:
+                        goal_velocity = jnp.array([0., 0, .1]) + self.env.goal_velocity
+                    else:
+                        goal_velocity = self.env.goal_velocity
+
+                    self.key, subkey = jax.random.split(self.key)
+                    force_activate = jax.random.bernoulli(subkey, .03)
+                    self.key, subkey = jax.random.split(self.key)
+                    force_applied = jax.random.normal(subkey,  self.mj_data.xfrc_applied[self.sim.body_id][3:5].shape) * self.cfg["STD"]["std_force"] * force_activate * 0
+                    
+                    mjx_data = mjx.put_data(self.mj_model, self.mj_data)
+                    self.env = ENVS(mjx_data, self.env.model, action, self.env.curr_action, self.env.step_num + 1, None, None, force_applied, goal_velocity, None)
+                i += 1
+
+
+if __name__ == "__main__":
+    cfg_file = "/home/leo-benaharon/Desktop/RL_Testing_Ground/RL_Algos/PPO.yaml"
+
+    # Run deterministic evaluation
+    runner = ViewerRunner(cfg_file, goal_vel=jnp.array([0, 0, 0]), deterministic=False)
+    runner.run()

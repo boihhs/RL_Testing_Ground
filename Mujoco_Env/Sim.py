@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from dataclasses import dataclass, field
 import jax.tree_util
 from functools import partial
-from Robot_Models.booster_t1.booster import get_obs_and_reward_walking
+from Robot_Models.zeroth.zeroth import get_obs_and_reward_walking
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
@@ -150,6 +150,7 @@ class Sim:
 
             key, subkey = jax.random.split(key)
             qpos = jnp.array(self.cfg["PPO"]["init_pos"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_pos"]).shape) * self.cfg["STD"]["std_joint_pos"]
+            qpos = qpos.at[2].set(.32)
             key, subkey = jax.random.split(key)
             qvel = jnp.array(self.cfg["PPO"]["init_vel"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_vel"]).shape) * self.cfg["STD"]["std_joint_vel"]
             
@@ -174,8 +175,8 @@ class Sim:
             prev_action = jnp.array(self.cfg["PPO"]["default_qpos"])
 
             key, subkey = jax.random.split(key)
-            goal_velocity = jax.random.normal(subkey,  (3,)) * self.cfg["STD"]["std_goal_velocity"]
-
+            goal_velocity = jax.random.uniform(subkey, (3,), minval=-1.0, maxval=1.0) * self.cfg["STD"]["std_goal_velocity"]
+            # goal_velocity = jnp.array([0, -.5, 0])
             return ENVS(mjx_data, model, curr_action, prev_action, step_num, stiffness, damping, force_applied, goal_velocity, key)
 
         return _reset(keys)
@@ -192,8 +193,11 @@ class Sim:
 
             mask = (done > 0)
 
+            update_velocity = (done == -1)
+
             key, subkey = jax.random.split(key)
             qpos = jnp.array(self.cfg["PPO"]["init_pos"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_pos"]).shape) * self.cfg["STD"]["std_joint_pos"]
+            qpos = qpos.at[2].set(.32)
             key, subkey = jax.random.split(key)
             qvel = jnp.array(self.cfg["PPO"]["init_vel"]) + jax.random.normal(subkey,  jnp.array(self.cfg["PPO"]["init_vel"]).shape) * self.cfg["STD"]["std_joint_vel"]
             
@@ -221,18 +225,16 @@ class Sim:
             key, subkey = jax.random.split(key)
             force_activate = jax.random.bernoulli(key, .03)
             key, subkey = jax.random.split(key)
-            force_applied = jax.random.normal(subkey,  d.xfrc_applied[self.body_id][3:5].shape) * self.cfg["STD"]["std_force"]
-            force_applied = jnp.where(force_applied > 0,
-                    jnp.maximum(force_applied, self.cfg["STD"]["std_force"] / 2),
-                    jnp.minimum(force_applied, -self.cfg["STD"]["std_force"] / 2))  * force_activate
+            force_applied = jax.random.normal(subkey,  d.xfrc_applied[self.body_id][3:5].shape) * self.cfg["STD"]["std_force"] * force_activate
 
-            step_num = jnp.where(mask, 0, env.step_num)
+            step_num = jnp.where((mask | update_velocity), 0, env.step_num)
 
             curr_action = jnp.where(mask, jnp.array(self.cfg["PPO"]["default_qpos"]), env.curr_action)
             prev_action = jnp.where(mask, jnp.array(self.cfg["PPO"]["default_qpos"]), env.prev_action)
 
             key, subkey = jax.random.split(key)
-            goal_velocity = jnp.where(mask, jax.random.normal(subkey,  (3,)) * self.cfg["STD"]["std_goal_velocity"], env.goal_velocity)
+            # goal_velocity = jnp.array([0, -.5, 0])
+            goal_velocity = jnp.where((mask | update_velocity), jax.random.uniform(subkey, (3,), minval=-1.0, maxval=1.0) * self.cfg["STD"]["std_goal_velocity"], env.goal_velocity)
 
             return ENVS(d, m, curr_action, prev_action, step_num, stiffness, damping, force_applied, goal_velocity, key)
         
@@ -243,13 +245,15 @@ class Sim:
 
         keys = jax.random.split(key, int(self.cfg["PPO"]["batch_size"]))
 
-        @partial(jax.vmap, in_axes=(0, 0), out_axes=(0))
+        @partial(jax.vmap, in_axes=(0, 0), out_axes=(0, 0, 0, 0))
         def _get_obs_and_reward(env: ENVS, key):
-            obs, reward, done = get_obs_and_reward_walking(env, self, key)
+            obs, reward, done, reward_terms = get_obs_and_reward_walking(env, self, key)
             
-            return obs, reward, done
-        
-        return _get_obs_and_reward(envs, keys)
+            return obs, reward, done, reward_terms
+
+        obs, reward, done, reward_terms = _get_obs_and_reward(envs, keys)
+        mean_reward_terms = jax.tree_util.tree_map(lambda x: jnp.mean(x), reward_terms)
+        return obs, reward, done, mean_reward_terms
 
     def tree_flatten(self):
         return (), (self.cfg, self.mj_model, self.mjx_model, self.timestep, self.body_id)

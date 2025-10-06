@@ -1,106 +1,109 @@
 PPO:
-  mini_batch_size: 256
+  mini_batch_size: 512
   
-  gamma: 0.995
+  gamma: 0.95
   lambda: .95
   e_clip: 0.4
   desired_kl: 0.01
 
-  learning_rate_value: 1e-3
-  learning_rate_policy: 1e-3
+  learning_rate_value: 1e-2
+  learning_rate_policy: 1e-2
   weight_decay: 1e-2
 
-  batch_size: 1024
+  batch_size: 5012
   bound_coef: 1
   entropy_coef:  -.1
   
-  mini_batch_loops: 20
-  num_epocs: 750
+  mini_batch_loops: 10
+  num_epocs: 1500
   max_timesteps: 1500
   horizon_length: 24
 
-  xml_path: "./Robot_Models/booster_t1/scene.xml"
+  xml_path: "./Robot_Models/zeroth/scene_mjx_feetonly_flat_terrain.xml"
   model_freq: 50
 
-  policy_model_shape: [80, 256, 256, 128, 46] # action_dim * 2
-  value_model_shape: [90, 256, 256, 128, 1]
+  policy_model_shape: [512, 256, 256, 32] # action_dim * 2
+  value_model_shape: [512, 256, 256, 1]
  
-  action_bias: [0.00,  0.435, -1.045, -0.085,  0.00, -1.220,
-    -1.045,  0.085,  0.00,  1.220,  0.00,
-    -0.115,  0.685,  0.00,  1.170, -0.260,  0.00,
-    -0.115, -0.685,  0.00,  1.170, -0.260,  0.00]
+  action_bias: [0, 0, 0,
+    0, 0, 0,
+    0, 0, 0, 0, -1.57,
+    0, 0, 0, 0, 1.57]
 
-  joint_q_min: [-1.57, -0.35,
-      -3.31, -1.74, -2.27, -2.44,
-      -3.31, -1.57, -2.27, 0,
-      -1.57,
-      -1.8, -0.2, -1, 0, -0.87, -0.44,
-      -1.8, -1.57, -1, 0, -0.87, -0.44]
+  joint_q_min: [-1.74533, -1.13446, -1.5708,
+      -1.74533, -1.13446, -1.5708,
+      -1.5708, -0.0872665, -0.785398,
+      -1.5708, -1.5708,
+      -1.5708, -0.0872665, -0.785398,
+      -1.5708, -1.5708
+  ]
 
-  joint_q_max: [1.57, 1.22,
-      1.22, 1.57, 2.27, 0,
-      1.22, 1.74, 2.27, 2.44,
-      1.57,
-      1.57, 1.57, 1, 2.34, 0.35, 0.44,
-      1.57, 0.2, 1, 2.34, 0.35, 0.44]
+  joint_q_max: [
+      1.74533, 0.872665, 1.5708,
+      1.74533, 0.872665, 1.5708,
+      1.5708, 1.5708, 0.785398,
+      1.5708, 1.5708,
+      1.5708, 1.5708, 0.785398,
+      1.5708, 1.5708
+  ]
 
-  policy_state_dim: 80
-  value_state_dim: 90
-  total_obs_dim: 90
+  policy_state_dim: 55
+  value_state_dim: 65
+  total_obs_dim: 65
   
-  action_dim: 23
+  action_dim: 16
 
-  init_pos: [0., 0., 0.665,
-    1., 0., 0., 0.,
-    0, 0,
-    0.2, -1.35, 0, -0.5,
-    0.2, 1.35, 0, 0.5,
-    0,
-    -0.2, 0, 0, 0.4, -0.25, 0,
-    -0.2, 0, 0, 0.4, -0.25, 0]
+  init_pos: [0, 0, .321,
+    1, 0, 0, 0,
+    0, 0, 0,
+    0, 0, 0,
+    0, 0, 0, 0, -1.57,
+    0, 0, 0, 0, 1.57]
 
   init_vel: [0, 0, 0,
     0., 0., 0.,
-    0., 0.,
-    0., 0., 0., 0.,
-    0., 0., 0., 0.,
-    0.,
-    0., 0., 0., 0., 0., 0.,
-    0., 0., 0., 0., 0., 0.]
+    0., 0., 0.,
+    0., 0., 0.,
+    0., 0., 0., 0., 0.,
+    0., 0., 0., 0., 0.]
 
   stiffness: [
-    20, 20,
-    20, 20, 20, 20,
-    20, 20, 20, 20,
-    200,
-    200, 200, 200, 200, 50, 50,
-    200, 200, 200, 200, 50, 50
+      # Shoulders / arms — very soft, for balance gestures only
+      3, 3, 3,          # right shoulder pitch, yaw, elbow
+      3, 3, 3,          # left  shoulder pitch, yaw, elbow
+
+      # Right leg — soft but slightly stiffer for support
+      6, 4, 5, 6, 3,    # hip pitch, hip yaw, hip roll, knee, ankle
+
+      # Left leg — mirror
+      6, 4, 5, 6, 3
   ]
+
   damping: [
-    0.2, 0.2,
-    0.5, 0.5, 0.5, 0.5,
-    0.5, 0.5, 0.5, 0.5,
-    5,
-    5, 5, 5, 5, 3, 3,
-    5, 5, 5, 5, 3, 3
+      # Shoulders / arms — light damping
+      0.4, 0.4, 0.4,
+      0.4, 0.4, 0.4,
+
+      # Right leg — total effective damping ≈ (k_d + passive ≈ 1.35)
+      0.3, 0.3, 0.3, 0.3, 0.25,
+
+      # Left leg
+      0.3, 0.3, 0.3, 0.3, 0.25
   ]
+
   
   torque_limit: [
-    7, 7,
-    10, 10, 10, 10,
-    10, 10, 10, 10,
-    30,
-    60, 25, 30, 60, 24, 15,
-    60, 25, 30, 60, 24, 15
+    4.9, 4.9, 4.9,
+    4.9, 4.9, 4.9,
+    4.9, 4.9, 4.9, 4.9, 4.9,
+    4.9, 4.9, 4.9, 4.9, 4.9
   ]
 
   default_qpos: [
-    0, 0,
-    0.2, -1.35, 0, -0.5,
-    0.2, 1.35, 0, 0.5,
-    0,
-    -0.2, 0, 0, 0.4, -0.25, 0,
-    -0.2, 0, 0, 0.4, -0.25, 0
+    0, 0, 0, #jkdfaks
+    0, 0, 0,
+    0, 0, 0, 0, -1.57,
+    0, 0, 0, 0, 1.57
   ]
 
 STD:
@@ -124,7 +127,7 @@ STD:
   std_gyro: .0
   std_acc: .0
   std_joint_pos: .00
-  std_joint_vel: .0
+  std_joint_vel: .00
 
   std_body_mass: .0
   std_body_inertia: .0
@@ -137,8 +140,8 @@ STD:
 
   std_qpos: .0
   std_qvel: .0
-  std_force: 0.
-  std_goal_velocity: .5
+  std_force: 0
+  std_goal_velocity: 2
 
 Rewards:
   alive:          0.5      # ↓   standing starts at only +0.5

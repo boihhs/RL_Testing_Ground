@@ -1,92 +1,48 @@
-import jax.numpy as jnp, jax
-from jax import random
-from jax.tree_util import register_pytree_node_class
+import jax
+import jax.numpy as jnp
+from flax import linen as nn
+from typing import Sequence
 from functools import partial
 
 
-@register_pytree_node_class
-class Policy:
-    def __init__(self, layer_sizes, action_bias, key=random.PRNGKey(0)):
-        self.params = self.init_network_params(layer_sizes, key)
-        self.LOG_STD_MIN = -5
-        self.LOG_STD_MAX = .5
-        self.action_bias = action_bias
-       
-    @staticmethod
-    def random_layer_params(m, n, key, scale=1e-2):
-        w_key, b_key = random.split(key)
-        return scale * random.normal(w_key, (n, m)), scale * random.normal(b_key, (n,))
-    
-    @staticmethod
-    def init_network_params(sizes, key):
-        keys = random.split(key, len(sizes))
-        return [Policy.random_layer_params(m, n, k) for m, n, k in zip(sizes[:-1], sizes[1:], keys)]
+class Policy(nn.Module):
+    layer_sizes: Sequence[int]
+    action_bias: jnp.ndarray
+    log_std_min: float = -5.0
+    log_std_max: float = 0.5
 
-    @staticmethod
-    @jax.jit
-    def relu(x):
-        return jnp.maximum(0, x)
-            
-    @jax.jit
-    @partial(jax.vmap, in_axes=(None, 0), out_axes=(0, 0))
-    def __call__(self, x): 
-        
-        activations = x
-        for w, b in self.params[:-1]:
-            outputs = jnp.dot(w, activations) + b
-            activations = self.relu(outputs)
+    @nn.compact
+    def __call__(self, x):
+        for size in self.layer_sizes[:-1]:
+            x = nn.Dense(size,
+                kernel_init=nn.initializers.normal(1e-3),
+                bias_init=nn.initializers.normal(1e-3))(x)
+            x = nn.relu(x)
 
-        final_w, final_b = self.params[-1]
-        logits = jnp.dot(final_w, activations) + final_b
+        x = nn.Dense(self.layer_sizes[-1],
+            kernel_init=nn.initializers.normal(1e-3),
+            bias_init=nn.initializers.normal(1e-3))(x)
 
-        out_len = logits.shape[-1]
+        out_len = x.shape[-1]
+        mu = x[..., :out_len // 2]
+        log_std = x[..., out_len // 2:]
 
-        mu = logits[:out_len // 2]
-        log_std = logits[out_len // 2:]
-        log_std = self.LOG_STD_MIN + .5 * (self.LOG_STD_MAX - self.LOG_STD_MIN) * (jnp.tanh(log_std) + 1)
-
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (jnp.tanh(log_std) + 1)
         return mu, log_std
-    
-    @jax.jit
-    def get_action(self, x, key):
-        mu, log_std = self(x)
 
-        noise = jax.random.normal(key, shape = log_std.shape)
+    def get_action(self, params, x, key):
+        mu, log_std = self.apply(params, x)
+        noise = jax.random.normal(key, shape=log_std.shape)
         std = jnp.exp(log_std).clip(1e-3, None)
-        action = (mu + std * noise) + self.action_bias[None, :]
+        return (mu + std * noise) + self.action_bias[None, :]
 
+    def get_raw_action(self, params, x):
+        mu, log_std = self.apply(params, x)
+        return mu + self.action_bias[None, :]
 
-        return action 
-    
-    @jax.jit
-    def get_raw_action(self, x):
-        mu, log_std = self(x)
-        action = mu + self.action_bias[None, :]
-        return action 
-    
-    @jax.jit
-    def get_log_prob(self, x, action):
-        mu, log_std = self(x)
-
+    def get_log_prob(self, params, x, action):
+        mu, log_std = self.apply(params, x)
         std = jnp.exp(log_std).clip(1e-3, None)
-
         pre_action = (action - self.action_bias[None, :])
-
-        log_density = -.5 * jnp.sum(((pre_action - mu) / std)**2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-        
-        log_prob = (log_density)
-        return log_prob, mu, log_std
-    
-
-    def tree_flatten(self):
-        children = (self.params,)
-        aux = (self.LOG_STD_MIN, self.LOG_STD_MAX, self.action_bias)
-        return children, aux
-
-    @classmethod
-    def tree_unflatten(cls, aux, children):
-        
-        obj = cls.__new__(cls)
-        obj.params, = children
-        obj.LOG_STD_MIN, obj.LOG_STD_MAX, obj.action_bias = aux
-        return obj
+        log_density = -0.5 * jnp.sum(((pre_action - mu) / std) ** 2 + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+        return log_density, mu, log_std
