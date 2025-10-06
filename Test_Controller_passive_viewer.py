@@ -157,6 +157,7 @@ class ViewerRunner:
                     mujoco.mj_resetDataKeyframe(self.mj_model, self.mj_data, self.kf_id)
                     episode_start = time.time()
                     print(np.mean(np.array(self.rewards)))
+                    print(self.env.step_num)
                     self.rewards = []
                     i = 0
                     mjx_data = mjx.put_data(self.mj_model, self.mj_data)

@@ -270,7 +270,7 @@ def get_obs_and_reward_walking(env, sim, key):
     # ---------------- Done flags ----------------
     fallen = (body_pos[2] < 0.20)
     done = (fallen) | (step_num > sim.cfg["PPO"]["max_timesteps"])
-    done = jnp.where((done == 0) & ((step_num + 1) % 100 == 0), -1, done)
+    done = jnp.where((done == 0) & ((step_num + 1) % 200 == 0), -1, done)
 
     # ---------------- Obs vector ----------------
     obs = jnp.concatenate([
@@ -312,7 +312,7 @@ def get_obs_and_reward_walking(env, sim, key):
         "joint_pos_limit":   -w_jlim    * joint_pos_limit,
         "c_joint_dev":       -w_jointdev* c_joint_devation,
         "c_contact_force":   -w_cfor    * c_contact_force,
-        "flight":            -w_flight_eff * flight,
+        "flight":            -w_flight * flight,
         # optional helpers
         "cmd_vx": cmd_xy[0], "cmd_vy": cmd_xy[1], "cmd_wz": cmd_wz,
         "vx": vx, "vy": vy, "vz": vz, "wz": wz,
