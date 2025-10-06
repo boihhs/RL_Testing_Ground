@@ -136,6 +136,7 @@ def get_obs_and_reward_walking(env, sim, key):
 
     cmd_lin_mag = jnp.linalg.norm(cmd_xy)
     standing = cmd_lin_mag < 0.15
+    cmd_xy = jnp.where(standing, cmd_xy*0, cmd_xy)
 
     # linear XY tracking (exp kernel)
     v_xy = jnp.array([vx, vy])
@@ -192,19 +193,19 @@ def get_obs_and_reward_walking(env, sim, key):
     # positive (per-second)
     w_trk_lin_ps = 10.0
     w_trk_ang_ps = 0.75
-    w_alive_ps   = 0.5
+    w_alive_ps   = 1.0
 
     # negative (per-second)
     w_lin_z_ps   = 2.0
     w_ang_xy_ps  = 0.2
     w_flat_ps    = 1.0
     w_hgt_ps     = 1.0
-    w_tau_ps     = 0.10
+    w_tau_ps     = 0.01
     w_qd_ps      = 0.02
-    w_act_ps     = 0.05
-    w_dact_ps    = 0.10
+    w_act_ps     = 0.02
+    w_dact_ps    = 0.03
     w_jlim_ps    = 5.0
-    w_jointdev_ps= 0.5
+    w_jointdev_ps= 0.1
     w_cfor_ps    = 1e-3
     w_flight_ps  = 0.20
     w_single_ps  = 1.0
@@ -270,7 +271,7 @@ def get_obs_and_reward_walking(env, sim, key):
     # ---------------- Done flags ----------------
     fallen = (body_pos[2] < 0.20)
     done = (fallen) | (step_num > sim.cfg["PPO"]["max_timesteps"])
-    done = jnp.where((done == 0) & ((step_num + 1) % 200 == 0), -1, done)
+    done = jnp.where((done == 0) & ((step_num + 1) % 100 == 0), -1, done)
 
     # ---------------- Obs vector ----------------
     obs = jnp.concatenate([
