@@ -114,7 +114,7 @@ class ViewerRunner:
         while (self.mj_data.time - sim_t0) < self.dt_control:
             joint_pos = self.mj_data.qpos[7:]
             joint_vel = self.mj_data.qvel[6:]
-            # action = jnp.array(jnp.array(self.cfg["PPO"]["default_qpos"]))
+            action = jnp.array(jnp.array(self.cfg["PPO"]["default_qpos"]))
 
             xfrc_applied_body = jnp.zeros(self.mj_data.xfrc_applied[self.sim.body_id].shape).at[3:5].set(self.env.force_applied)
             xfrc_applied = jnp.zeros(self.mj_data.xfrc_applied.shape).at[self.sim.body_id].set(xfrc_applied_body)
@@ -193,5 +193,5 @@ if __name__ == "__main__":
     cfg_file = "/home/leo-benaharon/Desktop/RL_Testing_Ground/RL_Algos/PPO.yaml"
 
     # Run deterministic evaluation
-    runner = ViewerRunner(cfg_file, goal_vel=jnp.array([0, 0, 0]), deterministic=True)
+    runner = ViewerRunner(cfg_file, goal_vel=jnp.array([0, 0, 0]), deterministic=False)
     runner.run()
