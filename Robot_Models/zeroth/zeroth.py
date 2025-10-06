@@ -131,12 +131,15 @@ def get_obs_and_reward_walking(env, sim, key):
         return jnp.exp(-x_sq / (2.0 * s * s + 1e-9))
 
     # commanded velocities (BODY frame), clipped
-    cmd_xy = jnp.clip(goal_velocity[:2], -1.5, 1.5)
-    cmd_wz = jnp.clip(goal_velocity[2],  -1.5, 1.5)
+    cmd_xy = goal_velocity[:2]
+    cmd_wz = goal_velocity[2]
+
+    cmd_lin_mag = jnp.linalg.norm(cmd_xy)
+    standing = cmd_lin_mag < 0.08
 
     # linear XY tracking (exp kernel)
     v_xy = jnp.array([vx, vy])
-    r_trk_lin_xy = _expq2(jnp.sum((v_xy - cmd_xy) ** 2), s=0.5)
+    r_trk_lin_xy = _expq2(jnp.sum((v_xy - cmd_xy) ** 2), s=0.9)
 
     # yaw-rate tracking (exp kernel)
     r_trk_ang_z = _expq2((wz - cmd_wz) ** 2, s=0.5)
@@ -187,7 +190,7 @@ def get_obs_and_reward_walking(env, sim, key):
     dt_model = 1.0 / sim.cfg["PPO"]["model_freq"]   # your policy/reward rate = 50 Hz => 0.02 s
 
     # positive (per-second)
-    w_trk_lin_ps = 5.0
+    w_trk_lin_ps = 10.0
     w_trk_ang_ps = 0.75
     w_alive_ps   = 0.5
 
@@ -227,31 +230,42 @@ def get_obs_and_reward_walking(env, sim, key):
     w_flight   = w_flight_ps   * dt_model
     w_dsup     = w_dsup_ps     * dt_model
 
+    # effective (piecewise) support/flight weights
+    w_single_eff = jnp.where(standing, -w_single,  w_single)
+    w_dsup_eff   = jnp.where(standing,  w_dsup,   -w_dsup)
+
+    w_flat_eff = jnp.where(standing, w_flat, 0.5 * w_flat)
+
     # ---------------- Assemble reward (no clamping; negatives allowed) ----------------
+    # support / flight terms depend on standing vs moving
+    support_reward = (
+        w_single_eff  * single_support
+        + w_dsup_eff    * double_support
+    )
+
     reward_pos = (
         w_trk_lin * r_trk_lin_xy
-      + w_trk_ang * r_trk_ang_z
-      + w_alive   * r_alive
-      + w_flight  * flight
-      + w_single  * single_support
+        + w_trk_ang * r_trk_ang_z
+        + w_alive   * r_alive
+        + support_reward
     )
 
     reward_neg = (
         w_lin_z   * c_lin_vel_z
-      + w_ang_xy  * c_ang_vel_xy
-      + w_flat    * c_flat_orient
-      + w_hgt     * c_base_height
-      + w_tau     * c_tau
-      + w_qd      * c_qd
-      + w_act     * c_act
-      + w_dact    * c_dact
-      + w_jlim    * joint_pos_limit
-      + w_jointdev* c_joint_devation
-      + w_cfor    * c_contact_force
-      + w_dsup    * double_support
+        + w_ang_xy  * c_ang_vel_xy
+        + w_flat_eff    * c_flat_orient
+        + w_hgt     * c_base_height
+        + w_tau     * c_tau
+        + w_qd      * c_qd
+        + w_act     * c_act
+        + w_dact    * c_dact
+        + w_jlim    * joint_pos_limit
+        + w_jointdev* c_joint_devation
+        + w_cfor    * c_contact_force
+        + w_flight  * flight
     )
 
-    reward = reward_pos - reward_neg
+    reward = support_reward + reward_pos - reward_neg
 
     # ---------------- Done flags ----------------
     fallen = (body_pos[2] < 0.20)
@@ -281,12 +295,15 @@ def get_obs_and_reward_walking(env, sim, key):
         "r_trk_lin_xy":      w_trk_lin * r_trk_lin_xy,
         "r_trk_ang_z":       w_trk_ang * r_trk_ang_z,
         "r_alive":           w_alive   * r_alive,
-        "r_single":          w_single  * single_support,
+
+        # support
+        "r_single":          w_single_eff * single_support,
+        "r_double":          w_dsup_eff   * double_support,
 
         # negative
         "c_lin_vel_z":       -w_lin_z   * c_lin_vel_z,
         "c_ang_vel_xy":      -w_ang_xy  * c_ang_vel_xy,
-        "c_flat_orient":     -w_flat    * c_flat_orient,
+        "c_flat_orient":     -w_flat_eff    * c_flat_orient,
         "c_base_height":     -w_hgt     * c_base_height,
         "c_tau":             -w_tau     * c_tau,
         "c_qd":              -w_qd      * c_qd,
@@ -295,8 +312,7 @@ def get_obs_and_reward_walking(env, sim, key):
         "joint_pos_limit":   -w_jlim    * joint_pos_limit,
         "c_joint_dev":       -w_jointdev* c_joint_devation,
         "c_contact_force":   -w_cfor    * c_contact_force,
-        "flight":            -w_flight  * flight,
-        "double_support":    -w_dsup   * double_support,
+        "flight":            -w_flight_eff * flight,
         # optional helpers
         "cmd_vx": cmd_xy[0], "cmd_vy": cmd_xy[1], "cmd_wz": cmd_wz,
         "vx": vx, "vy": vy, "vz": vz, "wz": wz,

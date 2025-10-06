@@ -266,19 +266,19 @@ class PPO:
            
             avg_buffer_rewards.append(jnp.mean(self.buffer.rewards))
             avg_loss.append(jnp.mean(loss))
-
-            ckpt_dir = Path("checkpoints").resolve()
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            checkpoints.save_checkpoint(
-                ckpt_dir=ckpt_dir,
-                target={
-                    "policy_params": self.policy_container.params,
-                    "policy_opt_state": self.policy_container.opt_state,
-                },
-                step=i,
-                prefix="policy_",
-                overwrite=True
-            )
+            if (i % 100 == 0):
+                ckpt_dir = Path("checkpoints").resolve()
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                checkpoints.save_checkpoint(
+                    ckpt_dir=ckpt_dir,
+                    target={
+                        "policy_params": self.policy_container.params,
+                        "policy_opt_state": self.policy_container.opt_state,
+                    },
+                    step=i,
+                    prefix="policy_",
+                    overwrite=True
+                )
 
         plt.figure(figsize=(12, 8))
 
