@@ -12,7 +12,7 @@ PPO:
 
   batch_size: 5012
   bound_coef: 1
-  entropy_coef:  -.1
+  entropy_coef:  -.05
   
   mini_batch_loops: 10
   num_epocs: 1500

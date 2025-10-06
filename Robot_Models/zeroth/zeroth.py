@@ -136,10 +136,10 @@ def get_obs_and_reward_walking(env, sim, key):
 
     # linear XY tracking (exp kernel)
     v_xy = jnp.array([vx, vy])
-    r_trk_lin_xy = _expq2(jnp.sum((v_xy - cmd_xy) ** 2), s=0.8)
+    r_trk_lin_xy = _expq2(jnp.sum((v_xy - cmd_xy) ** 2), s=0.5)
 
     # yaw-rate tracking (exp kernel)
-    r_trk_ang_z = _expq2((wz - cmd_wz) ** 2, s=0.8)
+    r_trk_ang_z = _expq2((wz - cmd_wz) ** 2, s=0.5)
 
     # "alive" (small positive bias for staying up)
     r_alive = (body_pos[2] > 0.20).astype(jnp.float32)
@@ -180,11 +180,8 @@ def get_obs_and_reward_walking(env, sim, key):
     # contact force penalty (approx of undesired contacts): penalize large impacts
     fL = jnp.linalg.norm(left_foot_force)
     fR = jnp.linalg.norm(right_foot_force)
-    F_MAX = 2.4 * body_mass * 9.81  # ~1.5 x body weight
+    F_MAX = 1.5 * body_mass * 9.81  # ~1.5 x body weight
     c_contact_force = jnp.maximum(0.0, fL - F_MAX) + jnp.maximum(0.0, fR - F_MAX)
-
-    r_liftoff = jnp.maximum(left_foot_vel[2], 0.0) + jnp.maximum(right_foot_vel[2], 0.0)
-    r_liftoff = (double_support) * r_liftoff
 
     # ---------------- Weights (per-second) -> scale by dt_model ----------------
     dt_model = 1.0 / sim.cfg["PPO"]["model_freq"]   # your policy/reward rate = 50 Hz => 0.02 s
@@ -193,30 +190,27 @@ def get_obs_and_reward_walking(env, sim, key):
     w_trk_lin_ps = 5.0
     w_trk_ang_ps = 0.75
     w_alive_ps   = 0.5
-    w_liftoff_ps = 0.5
-    w_single_ps  = 2
 
     # negative (per-second)
-    w_lin_z_ps   = .3
-    w_ang_xy_ps  = 0.05
-    w_flat_ps    = .3
-    w_hgt_ps     = .6
-    w_tau_ps     = 0.01
+    w_lin_z_ps   = 2.0
+    w_ang_xy_ps  = 0.2
+    w_flat_ps    = 1.0
+    w_hgt_ps     = 1.0
+    w_tau_ps     = 0.10
     w_qd_ps      = 0.02
     w_act_ps     = 0.05
-    w_dact_ps    = 0.02
+    w_dact_ps    = 0.10
     w_jlim_ps    = 5.0
     w_jointdev_ps= 0.20
-    w_cfor_ps    = 2e-4
-    w_flight_ps  = 0.4
-    w_dsup_ps    = 1
-    
+    w_cfor_ps    = 1e-3
+    w_flight_ps  = 0.20
+    w_single_ps  = 1.0
+    w_dsup_ps    = 0.25
 
     # scale by dt_model
     w_trk_lin  = w_trk_lin_ps  * dt_model
     w_trk_ang  = w_trk_ang_ps  * dt_model
     w_alive    = w_alive_ps    * dt_model
-    w_liftoff    = w_liftoff_ps * dt_model
     w_single   = w_single_ps   * dt_model
 
     w_lin_z    = w_lin_z_ps    * dt_model
@@ -238,9 +232,8 @@ def get_obs_and_reward_walking(env, sim, key):
         w_trk_lin * r_trk_lin_xy
       + w_trk_ang * r_trk_ang_z
       + w_alive   * r_alive
+      + w_flight  * flight
       + w_single  * single_support
-      + w_liftoff * r_liftoff 
-      
     )
 
     reward_neg = (
@@ -255,9 +248,7 @@ def get_obs_and_reward_walking(env, sim, key):
       + w_jlim    * joint_pos_limit
       + w_jointdev* c_joint_devation
       + w_cfor    * c_contact_force
-      
       + w_dsup    * double_support
-      + w_flight  * flight
     )
 
     reward = reward_pos - reward_neg
@@ -265,7 +256,7 @@ def get_obs_and_reward_walking(env, sim, key):
     # ---------------- Done flags ----------------
     fallen = (body_pos[2] < 0.20)
     done = (fallen) | (step_num > sim.cfg["PPO"]["max_timesteps"])
-    done = jnp.where((done == 0) & ((step_num + 1) % 200 == 0), -1, done)
+    done = jnp.where((done == 0) & ((step_num + 1) % 100 == 0), -1, done)
 
     # ---------------- Obs vector ----------------
     obs = jnp.concatenate([
@@ -291,7 +282,6 @@ def get_obs_and_reward_walking(env, sim, key):
         "r_trk_ang_z":       w_trk_ang * r_trk_ang_z,
         "r_alive":           w_alive   * r_alive,
         "r_single":          w_single  * single_support,
-        "r_liftoff": w_liftoff * r_liftoff,
 
         # negative
         "c_lin_vel_z":       -w_lin_z   * c_lin_vel_z,
